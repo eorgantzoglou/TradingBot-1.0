@@ -18,6 +18,12 @@ export function loadConfig() {
       baseURL: (process.env.OPENAI_BASE_URL || '').trim() || undefined,
       model: (process.env.MODEL_NAME || '').trim(),
       temperature: toNumber(process.env.TEMPERATURE, 0.2),
+      // Hybrid-thinking models (Qwen3.x, etc.) reason by default, which is
+      // enormously slow for routine structured output. Sending
+      // reasoning_effort=none disables it. Left unset the parameter is not
+      // sent at all, so providers that reject it are unaffected.
+      reasoningEffort: (process.env.REASONING_EFFORT || '').trim() || undefined,
+      timeoutMs: toNumber(process.env.REQUEST_TIMEOUT_MS, 180_000),
     },
     cdp: {
       host: (process.env.CDP_HOST || '127.0.0.1').trim(),

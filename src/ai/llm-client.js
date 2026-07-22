@@ -11,21 +11,26 @@ const TRENDS = new Set(['BULLISH', 'BEARISH', 'RANGING']);
  * compatibility layer, vLLM, ...). Everything comes from .env — nothing is
  * hardcoded.
  */
-export function createLLMClient({ apiKey, baseURL, model, temperature }) {
-  const client = new OpenAI({ apiKey, baseURL, maxRetries: 2 });
+export function createLLMClient({ apiKey, baseURL, model, temperature, reasoningEffort, timeoutMs }) {
+  const client = new OpenAI({ apiKey, baseURL, maxRetries: 2, timeout: timeoutMs ?? 180_000 });
 
-  async function complete(messages, useJsonMode) {
+  async function complete(messages, { jsonMode, effort }) {
     return client.chat.completions.create({
       model,
       temperature,
       messages,
-      ...(useJsonMode ? { response_format: { type: 'json_object' } } : {}),
+      ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
+      ...(effort ? { reasoning_effort: effort } : {}),
     });
   }
 
   /**
    * Sends the chart snapshot for analysis and returns
    * { analysis, rawResponse, usage }.
+   *
+   * Providers disagree about which optional parameters they accept, so the
+   * request degrades one capability at a time on a 4xx rather than failing:
+   * full -> drop json mode -> drop reasoning_effort.
    */
   async function analyze(snapshot) {
     const messages = [
@@ -33,22 +38,41 @@ export function createLLMClient({ apiKey, baseURL, model, temperature }) {
       { role: 'user', content: buildUserPrompt(snapshot) },
     ];
 
+    const attempts = [
+      { jsonMode: true, effort: reasoningEffort },
+      ...(reasoningEffort ? [{ jsonMode: false, effort: reasoningEffort }] : []),
+      { jsonMode: false, effort: undefined },
+    ];
+
     let completion;
-    try {
-      completion = await complete(messages, true);
-    } catch (err) {
-      // Some local servers reject response_format json_object with a 4xx —
-      // retry once relying on the prompt's JSON instructions alone.
-      if (err?.status === 400 || err?.status === 422) {
-        completion = await complete(messages, false);
-      } else {
-        throw decorateProviderError(err, baseURL);
+    let lastErr;
+    for (const opts of attempts) {
+      try {
+        completion = await complete(messages, opts);
+        break;
+      } catch (err) {
+        lastErr = err;
+        // Only a parameter-rejection is worth retrying with fewer features.
+        if (err?.status !== 400 && err?.status !== 422) {
+          throw decorateProviderError(err, baseURL);
+        }
       }
     }
+    if (!completion) throw decorateProviderError(lastErr, baseURL);
 
-    const content = completion?.choices?.[0]?.message?.content ?? '';
+    const message = completion?.choices?.[0]?.message ?? {};
+    const content = message.content ?? '';
     if (!content.trim()) {
-      throw new Error('The LLM returned an empty response.');
+      // Hybrid-thinking models divert their output into a non-standard
+      // `reasoning` field when thinking is left enabled, leaving content empty.
+      const divertedToReasoning = Boolean(message.reasoning || message.reasoning_content);
+      throw new Error(
+        divertedToReasoning
+          ? 'The LLM returned an empty response: its output went to the non-standard ' +
+            '"reasoning" field instead of "content". This model is a hybrid-thinking ' +
+            'model with thinking enabled — set REASONING_EFFORT=none in your .env.'
+          : 'The LLM returned an empty response.'
+      );
     }
     const analysis = validateAnalysis(extractJson(content));
     return { analysis, rawResponse: content, usage: completion.usage ?? null };

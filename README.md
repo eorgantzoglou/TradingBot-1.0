@@ -46,7 +46,8 @@ TradingBot/
     │   ├── dashboard.js    # colored terminal dashboard
     │   └── logger.js       # JSONL appender for backtesting
     └── tools/
-        └── check-cdp.js    # diagnostic: lists what the CDP port exposes
+        ├── check-cdp.js    # diagnostic: lists what the CDP port exposes
+        └── test-llm.js     # diagnostic: LLM pipeline test, no TradingView needed
 ```
 
 ## Setup
@@ -80,14 +81,42 @@ npm run dry-run       # extracts + prints your chart data, no LLM involved
 
 ### 3. Pick your LLM provider (edit `.env`)
 
-| Provider  | OPENAI_BASE_URL                    | OPENAI_API_KEY  | MODEL_NAME (example)      |
-|-----------|------------------------------------|-----------------|---------------------------|
-| LM Studio | `http://127.0.0.1:1234/v1`         | `lm-studio`     | whatever LM Studio serves |
-| Ollama    | `http://127.0.0.1:11434/v1`        | `ollama`        | `llama3.1:8b`             |
-| OpenAI    | *(leave empty)*                    | real key        | `gpt-4o-mini`             |
-| Anthropic | `https://api.anthropic.com/v1/`    | real key        | `claude-sonnet-5`         |
+| Provider        | OPENAI_BASE_URL                 | OPENAI_API_KEY | MODEL_NAME (example)      |
+|-----------------|---------------------------------|----------------|---------------------------|
+| LM Studio       | `http://127.0.0.1:1234/v1`      | `lm-studio`    | whatever LM Studio serves |
+| Ollama          | `http://127.0.0.1:11434/v1`     | `ollama`       | `llama3.1:8b`             |
+| Ollama over LAN | `http://<host-ip>:11434/v1`     | any string     | as reported by `/v1/models` |
+| OpenAI          | *(leave empty)*                 | real key       | `gpt-4o-mini`             |
+| Anthropic       | `https://api.anthropic.com/v1/` | real key       | `claude-sonnet-5`         |
 
 Switching providers is purely a `.env` edit — no code changes.
+
+Verify the LLM side end-to-end, without TradingView running:
+
+```powershell
+npm run check:llm     # pushes a synthetic snapshot through the whole pipeline
+```
+
+### Hybrid-thinking models: set `REASONING_EFFORT=none`
+
+Qwen3.x, DeepSeek-R1 and similar models **reason before answering by default**.
+For structured output like this bot's JSON verdict that is pure overhead, and the
+cost is not subtle. Measured against a local Qwen3.6-35B-A3B over the LAN, same
+request, JSON mode both times:
+
+| `reasoning_effort` | latency    | completion tokens |
+|--------------------|-----------|-------------------|
+| *(omitted)*        | **270.7 s** | 505               |
+| `none`             | **1.4 s**   | 13                |
+
+That is a 193× penalty for an identical verdict. In `--watch` mode it would stack
+analyses on top of each other. Some servers also divert the answer into a
+non-standard `reasoning` field, leaving `content` empty — the bot detects that case
+and names the fix in the error message.
+
+Set `REASONING_EFFORT=none` for such models, and leave it **empty** for `gpt-4o`,
+Claude and others that reject the parameter. The client degrades gracefully either
+way: on a `400`/`422` it retries without JSON mode, then without `reasoning_effort`.
 
 ## Usage
 
@@ -95,6 +124,7 @@ Switching providers is purely a `.env` edit — no code changes.
 npm start                 # one analysis of the active chart, then exit
 npm run watch             # re-analyze every 60s (or set POLL_INTERVAL_MS in .env)
 npm run dry-run           # extraction only + raw snapshot dump (debugging)
+npm run check:llm         # LLM-only test on a synthetic snapshot
 npm start -- --debug      # full run, also dumps the raw snapshot
 ```
 
