@@ -1,0 +1,44 @@
+import 'dotenv/config';
+
+function toNumber(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+/**
+ * Loads and validates all configuration from the environment (.env).
+ * Nothing is hardcoded: the LLM provider is entirely dictated by
+ * OPENAI_API_KEY / OPENAI_BASE_URL / MODEL_NAME.
+ */
+export function loadConfig() {
+  const config = {
+    llm: {
+      apiKey: (process.env.OPENAI_API_KEY || '').trim(),
+      // Empty/unset baseURL -> the openai package defaults to api.openai.com
+      baseURL: (process.env.OPENAI_BASE_URL || '').trim() || undefined,
+      model: (process.env.MODEL_NAME || '').trim(),
+      temperature: toNumber(process.env.TEMPERATURE, 0.2),
+    },
+    cdp: {
+      host: (process.env.CDP_HOST || '127.0.0.1').trim(),
+      port: toNumber(process.env.CDP_PORT, 9222),
+    },
+    pollIntervalMs: toNumber(process.env.POLL_INTERVAL_MS, 0),
+    logFile: (process.env.LOG_FILE || 'trades.log').trim(),
+  };
+
+  const problems = [];
+  if (!config.llm.model) {
+    problems.push('MODEL_NAME is required (the model id your provider serves, e.g. "gpt-4o-mini" or a local model name).');
+  }
+  if (!config.llm.apiKey) {
+    problems.push('OPENAI_API_KEY is required (for local servers like LM Studio/Ollama any placeholder string works).');
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `Invalid configuration:\n  - ${problems.join('\n  - ')}\n` +
+      'Copy .env.example to .env and fill in the values.'
+    );
+  }
+  return config;
+}
