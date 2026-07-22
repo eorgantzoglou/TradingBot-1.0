@@ -47,7 +47,9 @@ TradingBot/
     │   └── logger.js       # JSONL appender for backtesting
     └── tools/
         ├── check-cdp.js    # diagnostic: lists what the CDP port exposes
-        └── test-llm.js     # diagnostic: LLM pipeline test, no TradingView needed
+        ├── test-llm.js     # diagnostic: LLM pipeline test, no TradingView needed
+        ├── show-log.js     # read back past analyses from trades.log
+        └── score.js        # score past signals against real price history
 ```
 
 ## Setup
@@ -126,7 +128,44 @@ npm run watch             # re-analyze every 60s (or set POLL_INTERVAL_MS in .en
 npm run dry-run           # extraction only + raw snapshot dump (debugging)
 npm run check:llm         # LLM-only test on a synthetic snapshot
 npm start -- --debug      # full run, also dumps the raw snapshot
+
+npm run log               # table of every signal recorded so far
+npm run log -- --full 3   # replay analysis #3 as a full dashboard
+npm run score             # check past signals against what price actually did
 ```
+
+### Watch mode analyzes once per bar, not once per minute
+
+Polling the chart is cheap; analyzing is not. Watch mode looks every
+`WATCH_POLL_MS` (20s) but only sends an analysis when the current bar is at
+least `ANALYZE_AT_BAR_PCT` (90%) formed, and only once per bar.
+
+Two reasons. **Analytically**, a bar that just opened has provisional
+extremes and a volume near zero — a verdict drawn from it is mostly noise.
+**Practically**, each analysis occupies the model host for ~20s; re-asking
+every minute about the same unfinished bar yields near-identical verdicts
+while keeping a fanless laptop pinned.
+
+When the verdict changes between bars (`HOLD` → `BUY`), it is announced
+loudly with a terminal bell. Unchanged bars print a quiet one-line status.
+Use `--every-tick` for the old analyze-every-poll behaviour.
+
+### Scoring: is the model actually any good?
+
+```powershell
+npm run score
+npm run score -- --horizon 8 --threshold 0.25
+```
+
+Takes the price the model saw as the entry, looks up the close N bars later
+from public exchange data (Bitstamp first, since that is where the chart's
+BTCUSD comes from; Binance as fallback), and asks whether the call pointed
+the right way. `BUY` needs a rise beyond the threshold, `SELL` a fall,
+`HOLD` a move that stays inside the band.
+
+It measures direction only — no sizing, no stops, no fees. And it will tell
+you loudly when the sample is too small to mean anything, which below ~100
+signals it always is. **A 70% hit rate on 5 samples is noise.**
 
 The bot only analyzes what it can *see*: indicators hidden with the legend
 "eye" toggle are excluded, and any extraction fallbacks are surfaced as
@@ -156,5 +195,20 @@ const entries = fs.readFileSync('trades.log', 'utf8').trim().split('\n').map(JSO
   reports a warning whenever a fallback was used. If a TradingView update
   breaks a field, run `npm run dry-run` to see what is still being captured.
 - Number parsing assumes dot-decimal formatting (TradingView's default).
-- **This is a research tool, not financial advice. Signals come from an LLM
-  reading chart values — always apply your own risk management.**
+- The legend reports the bar being built *right now*, so its high, low,
+  close and volume are provisional. The bot computes how far into the bar it
+  is and tells the model explicitly — without that, a 30-second-old candle's
+  near-zero volume gets read as "no conviction in the market". Bar
+  completeness is only inferable for intraday timeframes, which align to the
+  UTC clock; daily and above depend on the exchange session.
+- The snapshot is a single instant, not a price history. The model sees each
+  indicator's current value but not its previous ones, so it cannot observe
+  slope, crossovers or divergences over time. The prompt forbids claiming
+  them; treat any such statement in the output as a hallucination.
+- `npm run score` compares against Bitstamp/Binance data. For a symbol on
+  another venue the prices will not tick-for-tick match your chart.
+- **This is a research tool, not financial advice.** It has no demonstrated
+  edge. An LLM reading a handful of numbers off a chart legend is doing
+  pattern-matching on text, not forecasting, and it will make arithmetic
+  slips about numbers it can see. Run `npm run score` before believing any
+  of it, and always apply your own risk management.

@@ -10,7 +10,9 @@
     "dry-run": "node src/index.js --dry-run --debug",
     "chart": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/launch-chart.ps1",
     "check:cdp": "node src/tools/check-cdp.js",
-    "check:llm": "node src/tools/test-llm.js"
+    "check:llm": "node src/tools/test-llm.js",
+    "log": "node src/tools/show-log.js",
+    "score": "node src/tools/score.js"
   },
   "engines": {
     "node": ">=18.0.0"

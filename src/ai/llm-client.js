@@ -82,13 +82,35 @@ export function createLLMClient({ apiKey, baseURL, model, temperature, reasoning
 }
 
 function decorateProviderError(err, baseURL) {
+  const endpoint = baseURL ?? 'https://api.openai.com/v1';
+  const msg = err?.message ?? '';
+
   if (err?.status === 401) {
-    return new Error(`The LLM endpoint rejected the API key (401). Check OPENAI_API_KEY. (${err.message})`);
+    return new Error(`The LLM endpoint rejected the API key (401). Check OPENAI_API_KEY. (${msg})`);
   }
-  if (err?.code === 'ECONNREFUSED' || /ECONNREFUSED|fetch failed|Connection error/i.test(err?.message ?? '')) {
+  if (err?.status === 404) {
     return new Error(
-      `Could not reach the LLM endpoint at ${baseURL ?? 'https://api.openai.com/v1'}. ` +
-      `Is your local model server (LM Studio/Ollama) running? (${err.message})`
+      `The endpoint at ${endpoint} does not know the model in MODEL_NAME (404). ` +
+      `Check the exact id it serves at ${endpoint}/models. (${msg})`
+    );
+  }
+  /* A host that accepted the connection then went quiet is usually a local
+     box that fell asleep mid-request, which looks different from a refusal. */
+  if (err?.name === 'APIConnectionTimeoutError' || /timed? ?out/i.test(msg)) {
+    return new Error(
+      `The LLM at ${endpoint} accepted the request but never answered (timeout).\n` +
+      'Common causes: the model host went to sleep, or it is loading the model from ' +
+      'cold (first request after idle can take a while).\n' +
+      'If it is a laptop, keep it awake (macOS: "caffeinate -dimsu") and confirm it is ' +
+      `still serving: curl ${endpoint}/models\n` +
+      'Raise REQUEST_TIMEOUT_MS in .env if the host is simply slow.'
+    );
+  }
+  if (err?.code === 'ECONNREFUSED' || /ECONNREFUSED|fetch failed|Connection error|ENOTFOUND|EHOSTUNREACH/i.test(msg)) {
+    return new Error(
+      `Could not reach the LLM endpoint at ${endpoint}.\n` +
+      'Is the model server (Ollama/LM Studio) running, and is the machine awake and on the network? ' +
+      `(${msg})`
     );
   }
   return err;

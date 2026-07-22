@@ -55,6 +55,15 @@ export function renderDashboard(snapshot, analysis, { model }) {
     out.push(row('Last bar', `O ${open ?? '?'}  H ${high ?? '?'}  L ${low ?? '?'}  C ${close ?? '?'}`));
   }
 
+  const bc = snapshot.barCompletion;
+  if (bc && bc.percentComplete < 100) {
+    const mmss = (s) => `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`;
+    const bar = '█'.repeat(Math.round(bc.percentComplete / 10)).padEnd(10, '░');
+    const note = `${bar} ${bc.percentComplete}% formed, ${mmss(bc.remainingSeconds)} to close`;
+    // Under a quarter formed, the bar's volume and extremes mean very little.
+    out.push(row('Bar progress', bc.percentComplete < 25 ? yellow(note) : dim(note)));
+  }
+
   out.push('');
   out.push(bold('  Indicators on chart'));
   if (snapshot.indicators.length === 0) {
@@ -62,7 +71,14 @@ export function renderDashboard(snapshot, analysis, { model }) {
   } else {
     for (const ind of snapshot.indicators) {
       const vals = ind.values.map((v) => (v.label ? `${v.label}: ${v.value}` : v.value)).join('  |  ');
-      out.push(`    • ${ind.name.padEnd(28)} ${cyan(vals)}`);
+      // Long names (an MA ribbon lists every period) would push the values
+      // off the right edge, so they get their own line instead.
+      if (ind.name.length > 28) {
+        out.push(`    • ${ind.name}`);
+        out.push(`      ${cyan(vals)}`);
+      } else {
+        out.push(`    • ${ind.name.padEnd(28)} ${cyan(vals)}`);
+      }
     }
   }
   if (snapshot.hiddenIndicatorCount > 0) {
@@ -120,6 +136,33 @@ export function renderDashboard(snapshot, analysis, { model }) {
   out.push('');
 
   console.log(out.join('\n'));
+}
+
+/**
+ * Announces that the verdict flipped since the previous bar.
+ *
+ * In watch mode most bars repeat the previous verdict, so the transitions
+ * are the only part worth looking up for. Printed loudly, with an optional
+ * terminal bell, so it is noticeable in a scrollback you are not reading.
+ */
+export function renderSignalChange(from, to, snapshot, { bell = true } = {}) {
+  const paintTo = SIGNAL_COLOR[to] ?? yellow;
+  const headline = `  ${from}  ->  ${to}  `;
+  const edge = '━'.repeat(headline.length);
+
+  const out = [];
+  out.push('');
+  out.push(bold(paintTo(`  ┏${edge}┓`)));
+  out.push(bold(paintTo(`  ┃${headline}┃`)));
+  out.push(bold(paintTo(`  ┗${edge}┛`)));
+  out.push(
+    dim(`   SIGNAL CHANGED on ${snapshot.symbol ?? '?'} ${snapshot.timeframe ?? ''} ` +
+        `at ${snapshot.price ?? '?'}  (${new Date().toLocaleTimeString()})`)
+  );
+  out.push('');
+  console.log(out.join('\n'));
+
+  if (bell) process.stdout.write('\x07');
 }
 
 export function renderError(err) {

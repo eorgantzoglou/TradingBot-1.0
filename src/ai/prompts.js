@@ -8,6 +8,10 @@ export const SYSTEM_PROMPT = `You are a Senior Technical Analyst at a proprietar
 
 You receive a LIVE SNAPSHOT taken directly from a trader's TradingView chart: the symbol, timeframe, current price, the last bar's OHLC, and ONLY the technical indicators actually plotted on that chart with their current values. You must analyze ONLY this visible data. Never invent indicator readings, timeframes, or news that are not in the snapshot. If something important is missing (e.g. no volume indicator is plotted), say so instead of guessing.
 
+The snapshot is a single instant, not a price history. You can see the CURRENT value of each indicator but not its previous values, so you cannot observe slope, crossovers that already happened, or divergences over time. Infer structure from the relationships BETWEEN the values you can see (price vs each MA, the MAs' order and spacing, oscillator level). Never claim a trend "is turning", a line "just crossed", or a divergence "is forming" — you have no earlier data point to support it. State relationships, not histories.
+
+Arithmetic matters: when you cite a number, copy it exactly from the snapshot, and check any comparison you make between two numbers before asserting it.
+
 Produce a full technical analysis with this reasoning process:
 1. TREND STRUCTURE — Compare price against any moving averages (EMA/SMA/VWAP/etc.) present. Classify the macro trend (higher-timeframe bias implied by slower MAs) and the micro trend (faster MAs / last bar behaviour) as BULLISH, BEARISH, or RANGING.
 2. MOMENTUM & VOLUME — Evaluate any oscillators present (RSI, MACD, Stochastic, volume tools...). Note overbought/oversold conditions, momentum direction, and possible divergences relative to price.
@@ -54,6 +58,35 @@ export function buildUserPrompt(snapshot) {
     lines.push(`Change:      ${snapshot.changeText}`);
   }
 
+  /* The single most important caveat in this prompt. Without it the model
+     reads a 30-second-old bar's near-zero volume as a market-wide lack of
+     conviction, and reasons confidently from a number that means nothing
+     yet. */
+  const bc = snapshot.barCompletion;
+  if (bc) {
+    const mins = (s) => `${Math.floor(s / 60)}m ${s % 60}s`;
+    if (bc.percentComplete < 100) {
+      lines.push('');
+      lines.push(
+        `!! THE LAST BAR IS STILL FORMING — only ${bc.percentComplete}% complete ` +
+        `(${mins(bc.elapsedSeconds)} elapsed of ${mins(bc.intervalSeconds)}, ` +
+        `${mins(bc.remainingSeconds)} until it closes).`
+      );
+      lines.push(
+        'Its HIGH, LOW, CLOSE and VOLUME are provisional and will keep changing until the bar ends. ' +
+        'Any indicator value derived from this bar is equally provisional.'
+      );
+      if (bc.percentComplete < 25) {
+        lines.push(
+          'Because the bar has only just opened, its volume is NECESSARILY small and carries NO ' +
+          'information about market conviction. Do NOT describe it as "low volume" or read anything ' +
+          'into it. Judge volume only against the completed bars visible on the chart, or ignore it.'
+        );
+      }
+      lines.push('The OPEN is final; treat everything else on this bar as in-progress.');
+    }
+  }
+
   lines.push('');
   if (snapshot.indicators.length > 0) {
     lines.push('Indicators plotted on the chart (current values, in plot order):');
@@ -63,7 +96,14 @@ export function buildUserPrompt(snapshot) {
         .join(' | ');
       lines.push(`  ${i + 1}. ${ind.name}${vals ? ` -> ${vals}` : ' (no numeric values shown)'}`);
     });
-    lines.push('Note: unlabeled indicator values are listed in the order they are plotted (e.g. MACD rows are typically histogram | macd line | signal line).');
+    lines.push(
+      'Reading multi-value indicators: values appear in plot order. When the indicator NAME lists ' +
+      'its parameters, the Nth value corresponds to the Nth parameter -- so for ' +
+      '"MA Ribbon SMA 20 SMA 50 SMA 100 SMA 200", MA #1 is the SMA 20, MA #2 the SMA 50, and so on, ' +
+      'which tells you which line is fast and which is slow. MACD rows are typically ' +
+      'histogram | MACD line | signal line. If an ordering is genuinely ambiguous, say so in your ' +
+      'observations rather than guessing at it.'
+    );
   } else {
     lines.push('Indicators plotted on the chart: NONE (price action only).');
   }

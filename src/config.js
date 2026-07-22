@@ -31,6 +31,18 @@ export function loadConfig() {
     },
     pollIntervalMs: toNumber(process.env.POLL_INTERVAL_MS, 0),
     logFile: (process.env.LOG_FILE || 'trades.log').trim(),
+    watch: {
+      /* How often to LOOK at the chart in watch mode. Looking is cheap (a
+         DOM read); analyzing is not, so these are separate concerns. */
+      pollMs: toNumber(process.env.WATCH_POLL_MS, 20_000),
+      /* Analyze once per bar, when the bar is at least this % formed.
+         Reading a bar that has just opened means judging provisional
+         extremes and a volume near zero; waiting until it is nearly closed
+         gives the analyst near-final data. Set 0 to analyze every poll. */
+      analyzeAtBarPct: toNumber(process.env.ANALYZE_AT_BAR_PCT, 90),
+      /* Ring the terminal bell when the verdict changes. */
+      bell: (process.env.ALERT_BELL || 'true').trim().toLowerCase() !== 'false',
+    },
   };
 
   const problems = [];

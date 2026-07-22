@@ -198,6 +198,39 @@ export function normalizeTimeframe(raw) {
   return t; // Unknown format: pass through untouched.
 }
 
+/** Converts a compact timeframe ("15m", "4h", "1D") into seconds.
+ *  Returns null for calendar months, whose length varies. */
+export function timeframeToSeconds(tf) {
+  const m = String(tf ?? '').match(/^(\d+)([smhDW])$/);
+  if (!m) return null; // includes "1M" - calendar months are not fixed-length
+  const unit = { s: 1, m: 60, h: 3600, D: 86400, W: 604800 }[m[2]];
+  return unit ? Number(m[1]) * unit : null;
+}
+
+/**
+ * How much of the current bar has formed.
+ *
+ * This matters more than it looks: the legend always reports the bar being
+ * built right now, so its high, low, close and volume are provisional. A
+ * 15m bar that is 20 seconds old shows a volume near zero, which an analyst
+ * will happily misread as "no conviction in the market" when it actually
+ * means "this candle just opened".
+ *
+ * Only computed for intraday bars, which align to the UTC clock. Daily and
+ * above depend on the exchange's session start, which is not visible here.
+ */
+export function computeBarCompletion(timeframe, atMs) {
+  const seconds = timeframeToSeconds(timeframe);
+  if (!seconds || seconds >= 86400) return null;
+  const elapsed = Math.floor(atMs / 1000) % seconds;
+  return {
+    intervalSeconds: seconds,
+    elapsedSeconds: elapsed,
+    remainingSeconds: seconds - elapsed,
+    percentComplete: Math.round((elapsed / seconds) * 100),
+  };
+}
+
 const OHLC_LABELS = new Set(['O', 'H', 'L', 'C']);
 
 function normalizeSnapshot(raw) {
@@ -288,8 +321,9 @@ function normalizeSnapshot(raw) {
     warnings.push('No legend items found — chart layout may have changed or no chart is open.');
   }
 
+  const extractedAtMs = Date.now();
   return {
-    extractedAt: new Date().toISOString(),
+    extractedAt: new Date(extractedAtMs).toISOString(),
     symbol: symbol || null,
     timeframe: timeframe || null,
     price,
@@ -297,6 +331,9 @@ function normalizeSnapshot(raw) {
     changeText,
     indicators,
     hiddenIndicatorCount: hiddenStudies.length,
+    /* The legend always reports the bar currently being built, so its
+       OHLC and volume are provisional. See computeBarCompletion. */
+    barCompletion: computeBarCompletion(timeframe, extractedAtMs),
     pageTitle: raw.pageTitle,
     url: raw.url,
     warnings,
