@@ -8,6 +8,7 @@
     "start": "node src/index.js",
     "watch": "node src/index.js --watch",
     "dry-run": "node src/index.js --dry-run --debug",
+    "chart": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/launch-chart.ps1",
     "check:cdp": "node src/tools/check-cdp.js",
     "check:llm": "node src/tools/test-llm.js"
   },

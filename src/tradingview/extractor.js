@@ -60,51 +60,77 @@ function scrapeChartDOM() {
     }
   }
 
-  /* ---------------- Legend: main series + indicators ---------------- */
+  /* ---------------- Legend: main series + indicators ----------------
+     Class names are build-hashed (item-YTFIJ62h, valueValue-YTFIJ62h), but
+     the `data-qa-id` test attributes are stable across TradingView builds,
+     so they are the primary selectors here and classes are only fallbacks.
+
+     Note `data-qa-id` holds a space-separated LIST of tokens, e.g.
+     "title-wrapper legend-source-title", hence the ~= word-match. */
   const readLegendItem = (item) => {
-    const titleParts = qa('[data-name="legend-source-title"]', item)
-      .map(text)
-      .filter(Boolean);
-    let title = titleParts.join(' ');
+    /* A study's name is split across two kinds of element: the source title
+       ("EMA") and one description per input ("20", "close"). Both are needed
+       -- without the inputs, an EMA 20 and an EMA 50 are indistinguishable
+       and the analyst cannot tell the fast MA from the slow one.
+
+       The series row is different again: its siblings are the interval and
+       exchange, which is why the descriptions are matched by qa-id and not
+       by a loose [class*="title"] that would glue on "1" and "Bitstamp". */
+    const titleMain = qa('[data-qa-id~="legend-source-title"]', item).map(text).filter(Boolean);
+    const titleArgs = qa('[data-qa-id~="legend-source-description"]', item).map(text).filter(Boolean);
+    let title = [...titleMain, ...titleArgs].join(' ');
     if (!title) {
-      title = text(q('[class*="titleWrapper"]', item)) || text(q('[class*="title"]', item));
+      title = text(q('[class*="mainTitle"]', item)) || text(q('[class*="titleWrapper"]', item));
     }
 
+    const NO_DATA = '\u2205'; // TradingView renders "no value here" as the empty set
     let values = qa('[class*="valueItem"]', item)
       .map((vi) => ({
-        label: text(q('[class*="valueTitle"]', vi)),
+        label: text(q('[class*="valueTitle"]', vi)) || vi.getAttribute('data-test-id-value-title') || '',
         value: text(q('[class*="valueValue"]', vi)),
       }))
-      .filter((v) => v.value !== '');
+      .filter((v) => v.value !== '' && v.value !== NO_DATA);
     if (values.length === 0) {
       values = qa('[class*="valueValue"]', item)
         .map((el) => ({ label: '', value: text(el) }))
-        .filter((v) => v.value !== '');
+        .filter((v) => v.value !== '' && v.value !== NO_DATA);
     }
 
-    /* Studies hidden via the legend "eye" toggle get a disabled/hidden class
-       somewhere on the row — those are NOT visible on the chart. */
-    const cls = typeof item.className === 'string' ? item.className : '';
-    const hidden =
-      /disabled|hidden/i.test(cls) ||
-      Boolean(q('[class*="disabled"][class*="title"]', item));
+    /* Visibility comes from the legend "eye" button, whose label flips
+       between Hide (currently shown) and Show (currently hidden). Class
+       sniffing is wrong here: rows legitimately carry "blockHidden-*",
+       which is responsive layout, not user-toggled visibility. */
+    const eye = q('[data-qa-id="legend-show-hide-action"]', item);
+    const eyeLabel = eye ? (eye.getAttribute('title') || eye.getAttribute('aria-label') || '') : '';
+    const hidden = /^show$/i.test(eyeLabel.trim());
 
     return { title, values, hidden };
   };
 
-  const legendItems = qa('[data-name="legend-source-item"]', chartRoot);
-  const explicitSeries = q('[data-name="legend-series-item"]', chartRoot);
+  const legendRoot =
+    q('[data-qa-id="legend"]', chartRoot) ||
+    q('[class*="chart-gui-wrapper__legend"]', chartRoot) ||
+    chartRoot;
 
-  let seriesItem = null;
-  const studyItems = [];
-  for (const item of legendItems) {
-    const isSeries =
-      (explicitSeries && (item === explicitSeries || item.contains(explicitSeries))) ||
-      (!explicitSeries && !seriesItem && item === legendItems[0]);
-    if (isSeries && !seriesItem) seriesItem = item;
-    else studyItems.push(item);
+  const seriesItem =
+    q('[data-qa-id="legend-series-item"]', legendRoot) ||
+    q('[class*="legendMainSourceWrapper"] [class*="item-"]', legendRoot);
+
+  const isOutsideSeries = (el) =>
+    el !== seriesItem && !(seriesItem && (seriesItem.contains(el) || el.contains(seriesItem)));
+
+  /* Indicator rows. Primary: the stable qa id. Fallback: any legend row
+     carrying values or a source title that is not the series row. */
+  let studyItems = qa('[data-qa-id="legend-source-item"]', legendRoot).filter(isOutsideSeries);
+  if (studyItems.length === 0) {
+    studyItems = qa('[class*="item-"]', legendRoot).filter(
+      (el) =>
+        isOutsideSeries(el) &&
+        (el.querySelector('[class*="valueItem"]') || el.querySelector('[data-qa-id~="legend-source-title"]'))
+    );
+    // Drop rows nested inside another candidate, keeping only outermost rows.
+    studyItems = studyItems.filter((el) => !studyItems.some((other) => other !== el && other.contains(el)));
   }
-  if (!seriesItem && explicitSeries) seriesItem = explicitSeries;
 
   return {
     url: location.href,
@@ -113,7 +139,7 @@ function scrapeChartDOM() {
     timeframeRaw,
     series: seriesItem ? readLegendItem(seriesItem) : null,
     studies: studyItems.map(readLegendItem),
-    legendItemCount: legendItems.length,
+    legendItemCount: (seriesItem ? 1 : 0) + studyItems.length,
   };
 }
 
