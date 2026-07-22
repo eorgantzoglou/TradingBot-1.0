@@ -1,214 +1,173 @@
-# TradingView AI Trading Bot
+# scout
 
-A local, automated bridge between the **TradingView Desktop app** and **any LLM**.
-The bot connects to the desktop app over the Chrome DevTools Protocol (CDP),
-reads exactly what is on your active chart (symbol, timeframe, price, and every
-plotted indicator), asks an LLM acting as a Senior Technical Analyst for a full
-structured analysis, prints a terminal dashboard, and logs everything for
-backtesting.
+A global deep-research equity scout: harvest primary regulatory filings, run a
+cited LLM research pipeline over them, and measure honestly whether the picks
+are any good.
 
-```
-┌────────────────────┐   CDP (localhost:9222)   ┌──────────────────┐
-│ TradingView Desktop│ ───────────────────────► │  DOM Extractor   │
-│  (your live chart) │                          │  (puppeteer-core)│
-└────────────────────┘                          └────────┬─────────┘
-                                                         │ chart snapshot
-                                                         ▼
-┌────────────────────┐   OpenAI-compatible API  ┌──────────────────┐
-│  Any LLM provider  │ ◄──────────────────────► │ Analysis Engine  │
-│ LM Studio / Ollama │      (openai npm pkg)    │ (Senior TA prompt│
-│ OpenAI / Anthropic │                          │  + strict JSON)  │
-└────────────────────┘                          └────────┬─────────┘
-                                                         │ validated verdict
-                                                         ▼
-                                    ┌─────────────────────────────────┐
-                                    │ Terminal dashboard + trades.log │
-                                    └─────────────────────────────────┘
-```
+Two co-equal goals — this is a side/educational project, so the harness matters
+as much as the application:
 
-## Project structure
+1. **The harness** (`scout.harness`) — a hand-written LLM pipeline: provider
+   abstraction, reasoning normalization across four incompatible conventions,
+   a structured-output ladder with a repair loop, a content-addressed replay
+   cache, and per-stage cost accounting.
+2. **The application** (`scout.data`, and later `scout.metrics` / `scout.screen`
+   / `scout.research`) — find globally-listed small/microcap companies that are
+   cheap *and* healthy *and* under-followed.
 
-```
-TradingBot/
-├── package.json
-├── .env.example            # copy to .env — ALL configuration lives here
-├── trades.log              # JSONL log of every interaction (created on first run)
-└── src/
-    ├── index.js            # orchestrator (single-shot & watch mode)
-    ├── config.js           # .env loading + validation
-    ├── tradingview/
-    │   ├── cdp-client.js   # connects to localhost:9222, finds the chart window
-    │   └── extractor.js    # DOM scraping: symbol, timeframe, price, indicators
-    ├── ai/
-    │   ├── prompts.js      # Senior Technical Analyst system prompt + snapshot prompt
-    │   └── llm-client.js   # provider-agnostic OpenAI SDK wrapper + JSON validation
-    ├── output/
-    │   ├── dashboard.js    # colored terminal dashboard
-    │   └── logger.js       # JSONL appender for backtesting
-    └── tools/
-        ├── check-cdp.js    # diagnostic: lists what the CDP port exposes
-        ├── test-llm.js     # diagnostic: LLM pipeline test, no TradingView needed
-        ├── show-log.js     # read back past analyses from trades.log
-        └── score.js        # score past signals against real price history
-```
+It does **not** place orders, and nothing it produces is investment advice.
+[PLAN.md](PLAN.md) has the full design, the research it rests on, and a blunt
+section on what the evidence does and does not support.
 
-## Setup
+## Status
 
-### 1. Install
+| Phase | State |
+|---|---|
+| 0. Archive harvester | **done** — SEC, ESEF, EDINET, OpenDART, Companies House |
+| 1. LLM harness | **done** — adapters, reasoning, structured output, cache, cost |
+| 2. Data layer (parse → DuckDB) | not started |
+| 3. Metrics | not started |
+| 4. Screen | not started |
+| 5. Research agents | not started |
+| 6. Ledger + forward scoring | not started |
+
+## Quickstart
 
 ```powershell
-npm install
-copy .env.example .env
+uv sync --extra dev
+copy env.example .env     # then edit it
+uv run scout doctor
 ```
 
-### 2. Launch TradingView Desktop with the debug port
-
-TradingView Desktop is an Electron app, so it exposes CDP when launched with a flag:
+The only required setting is `USER_AGENT`, which must include a real contact
+email — SEC EDGAR returns a 403 without one and blocks "unclassified bots".
 
 ```powershell
-& "$env:LOCALAPPDATA\Programs\TradingView\TradingView.exe" --remote-debugging-port=9222
+uv run scout harvest --days 1      # collect yesterday's filings
+uv run scout status                # what the archive holds
+uv run scout llm-check             # exercise the whole harness, no data needed
 ```
 
-(Adjust the path if you installed it elsewhere. For everyday use, edit your
-TradingView shortcut: **Properties → Target** and append
-` --remote-debugging-port=9222` after the closing quote. TradingView must be
-**fully closed** first — the flag is ignored if an instance is already running.)
+### ⚠️ Start harvesting before you write any more code
 
-Verify the bridge:
+No retail vendor sells point-in-time fundamentals outside the US, so the only
+way to get one is to build it forward. The free sources purge:
+
+| Source | Retention |
+|---|---|
+| UK Companies House daily accounts | **60 days** |
+| Japan TDnet | **~30 days** |
+| Nasdaq symbol directory | snapshot only, no archive published |
+
+None of that can be reconstructed retroactively. Every day the collector is not
+running is a day of history permanently lost. Schedule `scout harvest` daily —
+it is the single highest-value thing in this repo, and it costs nothing.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `scout doctor` | Validate config; show which sources are usable and why |
+| `scout harvest --days N` | Harvest the last N days into the archive |
+| `scout harvest --from 2026-07-01 --to 2026-07-20` | Backfill a range |
+| `scout harvest -s sec -s esef --limit 5` | Restrict sources; cap documents (smoke test) |
+| `scout status` | Archive contents by source, size, day range |
+| `scout llm-check` | Round-trip the harness on a synthetic filing |
+
+Add `-v` before the subcommand for INFO logging: `scout -v harvest --days 1`.
+
+## Data sources
+
+Everything in phase 0 is free and needs no paid subscription.
+
+| Source | Coverage | Credential |
+|---|---|---|
+| **SEC EDGAR** | US, all filers | none (User-Agent only) |
+| **filings.xbrl.org** | EU + UK ESEF filings | none |
+| **EDINET** | Japan | free `EDINET_API_KEY` |
+| **OpenDART** | South Korea | free `OPENDART_API_KEY` |
+| **Companies House** | UK bulk accounts | none for bulk |
+
+Two coverage caveats worth knowing before you trust a screen built on this:
+
+- **ESEF applies to regulated markets only.** AIM, Euronext Growth, Nasdaq First
+  North and Scale are MTFs and are exempt — and that is where most European
+  microcaps list. `filings.xbrl.org` also has no Germany or Ireland at all.
+- **Companies House bulk filings are FRS 102/105 statutory *entity* accounts**,
+  whereas the same listed company's annual report is UK-adopted IFRS at the
+  *group* level. Different numbers, different scope; never mix them in one field.
+
+SEC data is public domain with no redistribution restriction — the only source
+here with that property. `filings.xbrl.org` currently states no usage
+restrictions. Everything else is subject to its publisher's terms.
+
+## Architecture
+
+```
+src/scout/
+  cli.py                 typer entry point
+  config.py              env-driven, validated, nothing hardcoded
+  harness/               THE LLM HARNESS -- hand-written on purpose
+    protocol.py          LLMClient Protocol, Message/Usage/ModelResponse, OutputMode
+    reasoning.py         the four-convention normalizer
+    adapters/            anthropic.py, openai_compat.py
+    structured.py        tier ladder + validate->re-ask repair loop
+    cache.py             content-addressed replay cache
+    cost.py              per-stage token and dollar rollup
+    build.py             assemble a client from config
+  data/
+    http.py              per-host rate limiting, retry, backoff
+    archive.py           append-only raw filing store
+    harvest.py           list -> fetch -> archive orchestration
+    sources/             sec, esef, edinet, opendart, companies_house
+```
+
+### The harness, briefly
+
+The design rule that shapes everything: **the LLM is a reader, not a calculator,
+and not a decider.** Numbers are computed in code and unit-tested; the model
+reads unstructured filing text and extracts qualitative facts with citations;
+ranking is deterministic. Of every open-source LLM investing project surveyed,
+the only one with peer-reviewed evidence that it works is the one where the LLM
+never makes the call.
+
+No agent framework. For a static-shape pipeline (fan-out → debate → synthesize)
+they are net-negative, and the genuinely hard parts here — reasoning-field
+normalization across heterogeneous backends, JSON-schema subset intersection,
+provenance, deterministic replay — are precisely the parts none of them solve.
+The orchestrator is `asyncio.gather` with a `Semaphore` and
+`return_exceptions=True`.
+
+Notable pieces:
+
+- **`reasoning.py`** resolves `reasoning_content` (vLLM, LiteLLM) →
+  `reasoning` (OpenRouter) → `thinking` (Ollama) → inline `<think>` tags
+  (llama.cpp, LM Studio), including unterminated and orphan-closing tags. Its
+  load-bearing rule: **empty content plus non-empty reasoning is an error, not a
+  success** — that is a hybrid-thinking model with thinking left on, and the fix
+  (`REASONING_EFFORT=none`) is named in the exception.
+- **`structured.py`** walks NATIVE_SCHEMA → STRICT_TOOL → JSON_OBJECT → TEXT,
+  dropping one rung per `UnsupportedParameterError`, then repairs by quoting the
+  Pydantic error back to the model. Anthropic's JSON Schema subset silently
+  drops `minimum`/`maximum`/`minLength`/`maxLength`, so constraints must live in
+  Pydantic validators — the wire schema is a hint, `model_validate()` is the gate.
+- **`cache.py`** keys on model, provider, every sampling parameter, the schema
+  hash and the prompt version — not just prompt text, which is the standard way
+  to end up serving subtly wrong cached results. It buys resumability, offline
+  iteration on later stages, and deterministic prompt tests.
+
+## Development
 
 ```powershell
-npm run check:cdp     # lists the windows the debugger can see
-npm run dry-run       # extracts + prints your chart data, no LLM involved
+uv run pytest -q
+uv run ruff check src tests
 ```
 
-### 3. Pick your LLM provider (edit `.env`)
+204 tests, no network — every source is exercised through `respx` mocks.
 
-| Provider        | OPENAI_BASE_URL                 | OPENAI_API_KEY | MODEL_NAME (example)      |
-|-----------------|---------------------------------|----------------|---------------------------|
-| LM Studio       | `http://127.0.0.1:1234/v1`      | `lm-studio`    | whatever LM Studio serves |
-| Ollama          | `http://127.0.0.1:11434/v1`     | `ollama`       | `llama3.1:8b`             |
-| Ollama over LAN | `http://<host-ip>:11434/v1`     | any string     | as reported by `/v1/models` |
-| OpenAI          | *(leave empty)*                 | real key       | `gpt-4o-mini`             |
-| Anthropic       | `https://api.anthropic.com/v1/` | real key       | `claude-sonnet-5`         |
-
-Switching providers is purely a `.env` edit — no code changes.
-
-Verify the LLM side end-to-end, without TradingView running:
-
-```powershell
-npm run check:llm     # pushes a synthetic snapshot through the whole pipeline
-```
-
-### Hybrid-thinking models: set `REASONING_EFFORT=none`
-
-Qwen3.x, DeepSeek-R1 and similar models **reason before answering by default**.
-For structured output like this bot's JSON verdict that is pure overhead, and the
-cost is not subtle. Measured against a local Qwen3.6-35B-A3B over the LAN, same
-request, JSON mode both times:
-
-| `reasoning_effort` | latency    | completion tokens |
-|--------------------|-----------|-------------------|
-| *(omitted)*        | **270.7 s** | 505               |
-| `none`             | **1.4 s**   | 13                |
-
-That is a 193× penalty for an identical verdict. In `--watch` mode it would stack
-analyses on top of each other. Some servers also divert the answer into a
-non-standard `reasoning` field, leaving `content` empty — the bot detects that case
-and names the fix in the error message.
-
-Set `REASONING_EFFORT=none` for such models, and leave it **empty** for `gpt-4o`,
-Claude and others that reject the parameter. The client degrades gracefully either
-way: on a `400`/`422` it retries without JSON mode, then without `reasoning_effort`.
-
-## Usage
-
-```powershell
-npm start                 # one analysis of the active chart, then exit
-npm run watch             # re-analyze every 60s (or set POLL_INTERVAL_MS in .env)
-npm run dry-run           # extraction only + raw snapshot dump (debugging)
-npm run check:llm         # LLM-only test on a synthetic snapshot
-npm start -- --debug      # full run, also dumps the raw snapshot
-
-npm run log               # table of every signal recorded so far
-npm run log -- --full 3   # replay analysis #3 as a full dashboard
-npm run score             # check past signals against what price actually did
-```
-
-### Watch mode analyzes once per bar, not once per minute
-
-Polling the chart is cheap; analyzing is not. Watch mode looks every
-`WATCH_POLL_MS` (20s) but only sends an analysis when the current bar is at
-least `ANALYZE_AT_BAR_PCT` (90%) formed, and only once per bar.
-
-Two reasons. **Analytically**, a bar that just opened has provisional
-extremes and a volume near zero — a verdict drawn from it is mostly noise.
-**Practically**, each analysis occupies the model host for ~20s; re-asking
-every minute about the same unfinished bar yields near-identical verdicts
-while keeping a fanless laptop pinned.
-
-When the verdict changes between bars (`HOLD` → `BUY`), it is announced
-loudly with a terminal bell. Unchanged bars print a quiet one-line status.
-Use `--every-tick` for the old analyze-every-poll behaviour.
-
-### Scoring: is the model actually any good?
-
-```powershell
-npm run score
-npm run score -- --horizon 8 --threshold 0.25
-```
-
-Takes the price the model saw as the entry, looks up the close N bars later
-from public exchange data (Bitstamp first, since that is where the chart's
-BTCUSD comes from; Binance as fallback), and asks whether the call pointed
-the right way. `BUY` needs a rise beyond the threshold, `SELL` a fall,
-`HOLD` a move that stays inside the band.
-
-It measures direction only — no sizing, no stops, no fees. And it will tell
-you loudly when the sample is too small to mean anything, which below ~100
-signals it always is. **A 70% hit rate on 5 samples is noise.**
-
-The bot only analyzes what it can *see*: indicators hidden with the legend
-"eye" toggle are excluded, and any extraction fallbacks are surfaced as
-warnings both on screen and to the LLM.
-
-## Logging / backtesting
-
-Every run appends one JSON line to `trades.log`:
-
-```js
-{ timestamp, snapshot, analysis, model, usage, raw_response }
-```
-
-Parse it later with:
-
-```js
-const entries = fs.readFileSync('trades.log', 'utf8').trim().split('\n').map(JSON.parse);
-```
-
-## Notes & limitations
-
-- The extractor reads TradingView's legend. Legend values follow your
-  crosshair — keep the mouse off the chart (or on the latest bar) so the
-  values reflect the live bar.
-- TradingView's DOM uses hashed class names that change between releases; the
-  extractor targets stable `data-name` attributes with several fallbacks and
-  reports a warning whenever a fallback was used. If a TradingView update
-  breaks a field, run `npm run dry-run` to see what is still being captured.
-- Number parsing assumes dot-decimal formatting (TradingView's default).
-- The legend reports the bar being built *right now*, so its high, low,
-  close and volume are provisional. The bot computes how far into the bar it
-  is and tells the model explicitly — without that, a 30-second-old candle's
-  near-zero volume gets read as "no conviction in the market". Bar
-  completeness is only inferable for intraday timeframes, which align to the
-  UTC clock; daily and above depend on the exchange session.
-- The snapshot is a single instant, not a price history. The model sees each
-  indicator's current value but not its previous ones, so it cannot observe
-  slope, crossovers or divergences over time. The prompt forbids claiming
-  them; treat any such statement in the output as a hallucination.
-- `npm run score` compares against Bitstamp/Binance data. For a symbol on
-  another venue the prices will not tick-for-tick match your chart.
-- **This is a research tool, not financial advice.** It has no demonstrated
-  edge. An LLM reading a handful of numbers off a chart legend is doing
-  pattern-matching on text, not forecasting, and it will make arithmetic
-  slips about numbers it can see. Run `npm run score` before believing any
-  of it, and always apply your own risk management.
+One lesson already learned the hard way: mocked tests only prove the code
+matches the fixture. Two real bugs in the SEC parser (a missing `edgar/` URL
+segment and a wrongly-dashed date column) passed a green suite because the
+fixture was fabricated. The fixtures are now built from live captures, and
+`scout harvest --limit 4` against a real source is part of the definition of
+done for any new source.

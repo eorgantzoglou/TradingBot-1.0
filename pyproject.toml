@@ -1,0 +1,49 @@
+[project]
+name = "scout"
+version = "0.1.0"
+description = "Global deep-research equity scout: harvests primary filings and runs a cited LLM research pipeline over them."
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+
+# Pinned exactly on purpose. This ecosystem ships weekly and the reasoning /
+# structured-output surfaces are exactly where silent breakage happens.
+dependencies = [
+    "anthropic==0.117.1",
+    "openai==2.46.0",
+    "pydantic>=2.9,<3",
+    "httpx>=0.27,<0.29",
+    "typer>=0.12,<0.16",
+    "rich>=13,<15",
+    "python-dotenv>=1.0,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "respx>=0.21",
+    "ruff>=0.7",
+]
+
+[project.scripts]
+scout = "scout.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/scout"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["error::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501"]
