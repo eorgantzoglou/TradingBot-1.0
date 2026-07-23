@@ -17,8 +17,12 @@ build/
 # NOTE: this is the project's most valuable asset and it CANNOT be rebuilt --
 # Companies House purges daily files after 60 days and TDnet after ~30. Keep it
 # out of git, but back it up somewhere durable. See PLAN.md section 1.3.
-data/
-!data/.gitkeep
+#
+# Anchored to the repo root ("/data/", not "data/") on purpose: an unanchored
+# rule also matches the SOURCE package src/scout/data/, silently un-tracking new
+# modules added there.
+/data/
+!/data/.gitkeep
 
 # Local machine-specific Claude Code settings
 .claude/settings.local.json
