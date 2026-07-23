@@ -25,7 +25,7 @@ section on what the evidence does and does not support.
 |---|---|
 | 0. Archive harvester | **done** — SEC, ESEF, EDINET, OpenDART, Companies House |
 | 1. LLM harness | **done** — adapters, reasoning, structured output, cache, cost |
-| 2. Data layer (parse → DuckDB) | not started |
+| 2. Data layer (parse → DuckDB) | **done** — SEC + ESEF parsed and normalized offline; FX per IAS 21 |
 | 3. Metrics | not started |
 | 4. Screen | not started |
 | 5. Research agents | not started |
@@ -45,6 +45,8 @@ email — SEC EDGAR returns a 403 without one and blocks "unclassified bots".
 ```powershell
 uv run scout harvest --days 1      # collect yesterday's filings
 uv run scout status                # what the archive holds
+uv run scout ingest                # parse the archive into normalized fundamentals
+uv run scout fundamentals          # coverage; --entity <CIK/LEI> for one snapshot
 uv run scout llm-check             # exercise the whole harness, no data needed
 ```
 
@@ -72,6 +74,8 @@ it is the single highest-value thing in this repo, and it costs nothing.
 | `scout harvest --from 2026-07-01 --to 2026-07-20` | Backfill a range |
 | `scout harvest -s sec -s esef --limit 5` | Restrict sources; cap documents (smoke test) |
 | `scout status` | Archive contents by source, size, day range |
+| `scout ingest` | Parse archived filings into normalized fundamentals (DuckDB) |
+| `scout fundamentals [--entity ID]` | Coverage by taxonomy, or one entity's latest snapshot |
 | `scout llm-check` | Round-trip the harness on a synthetic filing |
 
 Add `-v` before the subcommand for INFO logging: `scout -v harvest --days 1`.
@@ -121,6 +125,39 @@ src/scout/
     harvest.py           list -> fetch -> archive orchestration
     sources/             sec, esef, edinet, opendart, companies_house
 ```
+
+### Fundamentals, briefly
+
+`scout ingest` turns archived filings into comparable financial facts, entirely
+offline from the stored bytes (verified: edgartools reconstructs a full US-GAAP
+fact set from a stored submission with no network; ESEF xBRL-JSON is plain OIM
+JSON). The hard part — the "sleeper task" the plan flagged — is the concept
+mapping in `fundamentals/normalize.py`, which has to solve three problems at once
+or silently corrupt every metric built on top:
+
+- **Tag heterogeneity.** The same quantity has many tags. 3M reports cash as
+  `CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents`, not the plain
+  tag. Each concept has an ordered candidate list; the first that resolves wins,
+  and using a fallback is recorded as a warning.
+- **Dimensions.** Revenue appears once consolidated and 24 times split by
+  segment. Only the non-dimensioned total is ever accepted as a concept's value.
+- **Period selection.** A single Q2 10-Q contains, ending on the same date, both
+  a 90-day (discrete quarter) and a 180-day (year-to-date) figure — and
+  cash-flow items exist *only* as year-to-date. The normalizer targets the span
+  matching the fiscal period so every line item in a snapshot covers the **same**
+  period; each fact also stores its exact span, so nothing downstream has to
+  assume. Getting this wrong pairs a 3-month income figure with 6-month cash
+  flow — an incoherent snapshot that quietly breaks any cross-statement ratio.
+
+Everything is code-computed and golden-tested against real filings in both
+taxonomies (3M / us-gaap, a Ukrainian issuer / ifrs-full), to the digit. Derived
+figures (gross profit from revenue − COGS, TTM aggregation) belong in `metrics/`,
+not here — normalization stays a faithful mapping, and every canonical fact keeps
+`source_concept` so any number traces back to the exact tag it came from.
+
+Cross-currency comparison uses ECB reference rates under IAS 21 (balance-sheet
+items at the period-end rate, income/cash-flow items at the period average) —
+never a single spot rate, and never a vendor's FX.
 
 ### The harness, briefly
 

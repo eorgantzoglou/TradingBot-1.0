@@ -24,6 +24,9 @@ from scout.config import Config, load_config, load_config_for_harvest
 from scout.data.archive import Archive
 from scout.data.harvest import ALL_SOURCES, DayResult, build_sources, harvest, recent_days
 from scout.data.http import HttpClient
+from scout.fundamentals.concepts import Concept
+from scout.fundamentals.ingest import ingest
+from scout.fundamentals.store import FundamentalsStore
 from scout.harness.build import build_client
 from scout.harness.cost import CostLedger
 from scout.harness.errors import HarnessError
@@ -250,6 +253,112 @@ def _human_bytes(count: int) -> str:
             return f"{size:,.1f} {unit}" if unit != "B" else f"{int(size):,} B"
         size /= 1024
     return f"{size:,.1f} GB"
+
+
+# --------------------------------------------------------------------- ingest
+
+
+@app.command(name="ingest")
+def ingest_cmd(
+    source: Annotated[
+        list[str] | None, typer.Option("--source", "-s", help="Restrict to these sources.")
+    ] = None,
+    limit: Annotated[
+        int | None, typer.Option("--limit", help="Max documents to ingest (smoke test).")
+    ] = None,
+    reingest: Annotated[
+        bool, typer.Option("--reingest", help="Re-parse documents already ingested.")
+    ] = False,
+) -> None:
+    """Parse archived filings into normalized fundamentals in DuckDB.
+
+    Reads the archive, routes each filing to its parser, maps raw XBRL tags to
+    the canonical concept vocabulary, and stores both the raw facts (provenance)
+    and the normalized snapshot (what the screen and metrics read). Idempotent.
+    """
+    try:
+        config = load_config_for_harvest()
+    except ValueError as exc:
+        _fail(str(exc))
+        return
+
+    console.print(f"[bold]Ingesting[/bold] archive at {config.archive_dir} into {config.db_path}")
+    result = asyncio.run(
+        ingest(config, sources=source or None, limit=limit, reingest=reingest)
+    )
+
+    table = Table("metric", "count", title="Ingest")
+    table.add_row("considered", str(result.considered))
+    table.add_row("parsed", f"[green]{result.parsed}[/green]")
+    table.add_row("snapshots written", f"[green]{result.snapshots}[/green]")
+    table.add_row("no financial data", str(result.no_xbrl))
+    table.add_row("skipped (already ingested)", str(result.skipped_existing))
+    table.add_row("unsupported form/source", str(result.unsupported))
+    table.add_row("normalization warnings", str(result.warnings_total))
+    table.add_row("failed", f"[red]{result.failed}[/red]" if result.failed else "0")
+    console.print(table)
+
+    if result.errors:
+        console.print("\n[bold red]Errors[/bold red]")
+        for error in result.errors:
+            console.print(f"  {error}")
+    if result.failed:
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def fundamentals(
+    entity: Annotated[
+        str | None, typer.Option("--entity", "-e", help="Entity id (CIK, LEI, ...) to show.")
+    ] = None,
+) -> None:
+    """Show fundamentals coverage, or one entity's latest normalized snapshot."""
+    try:
+        config = load_config_for_harvest()
+    except ValueError as exc:
+        _fail(str(exc))
+        return
+
+    if not config.db_path.exists():
+        _fail(f"No fundamentals database at {config.db_path}. Run `scout ingest` first.")
+        return
+
+    with FundamentalsStore(config.db_path, read_only=True) as store:
+        if entity is None:
+            table = Table("taxonomy", "entities", "snapshots", "concepts",
+                          title=f"Fundamentals: {config.db_path}")
+            for row in store.coverage():
+                table.add_row(row["taxonomy"], str(row["entities"]),
+                              str(row["snapshots"]), str(row["concepts"]))
+            console.print(table)
+            console.print(
+                f"\n{store.entity_count()} entities, {store.snapshot_count()} snapshots. "
+                "Pass --entity <id> to see one."
+            )
+            return
+
+        snapshot = store.latest_snapshot(entity)
+        if snapshot is None:
+            _fail(f"No snapshot for entity {entity!r}.")
+            return
+
+        console.print(
+            f"[bold]{snapshot.entity.name or snapshot.entity.entity_id}[/bold] "
+            f"({snapshot.entity.entity_id}, {snapshot.taxonomy})  "
+            f"{snapshot.period_end} {snapshot.fiscal_period or ''} {snapshot.currency or ''}"
+        )
+        table = Table("concept", "value", "span", "source tag", title="Latest snapshot")
+        for concept in Concept:
+            fact = snapshot.facts.get(concept)
+            if fact is None:
+                continue
+            span = f"{(fact.period_end - fact.period_start).days}d" if fact.period_start else "instant"
+            table.add_row(concept.value, f"{fact.value:,.0f}", span, fact.source_concept)
+        console.print(table)
+        if snapshot.warnings:
+            console.print(f"\n[dim]{len(snapshot.warnings)} normalization warning(s):[/dim]")
+            for warning in snapshot.warnings:
+                console.print(f"  [dim]- {warning}[/dim]")
 
 
 # ------------------------------------------------------------------ llm-check
