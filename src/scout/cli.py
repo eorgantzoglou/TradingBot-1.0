@@ -9,9 +9,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections import Counter
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -35,6 +37,10 @@ from scout.harness.protocol import Message
 from scout.harness.structured import complete_structured
 from scout.metrics.base import MarketData
 from scout.metrics.report import compute_metrics
+from scout.portfolio.evaluate import DEFAULT_COST_BPS, evaluate
+from scout.portfolio.ledger import Ledger, LedgerError
+from scout.portfolio.models import Evaluation, Strategy, StrategyScore
+from scout.portfolio.pick import PickBatch, run_pick
 from scout.research.models import Verdict
 from scout.research.pipeline import research_entities
 from scout.screen.profile import enrich
@@ -665,6 +671,242 @@ def _render_memo(report) -> None:  # type: ignore[no-untyped-def]
 
 def _sev_color(severity: str) -> str:
     return {"critical": "red", "high": "yellow", "medium": "cyan", "low": "dim"}.get(severity, "")
+
+
+# ----------------------------------------------------------------- pick / score
+
+
+def _load_prices(inline: list[str] | None, prices_file: str | None) -> dict[str, float]:
+    """Assemble a manual price map from a JSON file and/or inline ID=VALUE pairs.
+
+    There is no price feed yet (PLAN.md 1.3 deferral), so prices are supplied by
+    hand. Inline pairs override the file, so a quick correction does not mean
+    editing the file. A malformed entry fails loud rather than being dropped --
+    a silently ignored price becomes a silently ungradeable pick.
+    """
+    prices: dict[str, float] = {}
+    if prices_file:
+        path = Path(prices_file)
+        if not path.exists():
+            _fail(f"prices file not found: {path}")
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            _fail(f"could not read prices file {path}: {exc}")
+        if not isinstance(raw, dict):
+            _fail(f"prices file {path} must be a JSON object of entity_id -> price.")
+        for entity_id, value in raw.items():  # type: ignore[union-attr]
+            try:
+                prices[str(entity_id)] = float(value)
+            except (TypeError, ValueError):
+                _fail(f"price for {entity_id!r} in {path} is not a number: {value!r}")
+
+    for pair in inline or []:
+        if "=" not in pair:
+            _fail(f"--price expects ENTITY=VALUE, got {pair!r}.")
+        entity_id, _, value = pair.partition("=")
+        try:
+            prices[entity_id.strip()] = float(value)
+        except ValueError:
+            _fail(f"--price value for {entity_id!r} is not a number: {value!r}")
+    return prices
+
+
+@app.command(name="pick")
+def pick_cmd(
+    price: Annotated[
+        list[str] | None,
+        typer.Option("--price", help="Manual reference price, ENTITY=VALUE (repeatable)."),
+    ] = None,
+    prices_file: Annotated[
+        str | None, typer.Option("--prices", help="JSON file of entity_id -> reference price.")
+    ] = None,
+    as_of: Annotated[
+        str | None, typer.Option("--as-of", help="Pick date, YYYY-MM-DD (default: today).")
+    ] = None,
+    top: Annotated[int, typer.Option("--top", help="Names in the screen/agent books.")] = 20,
+    with_research: Annotated[
+        bool, typer.Option("--research", help="Also run the LLM pipeline and record the agent book.")
+    ] = False,
+    no_cache: Annotated[bool, typer.Option("--no-cache", help="Bypass the replay cache.")] = False,
+) -> None:
+    """Pre-register today's paper picks for each strategy into the ledger.
+
+    Forward paper trading is the only credible evidence this project can produce
+    (PLAN.md 1.3), and it only counts if the pick is recorded BEFORE the outcome
+    is known -- so run this the day the screen works and every rebalance after.
+    Deterministic by default; pass --research to also record the agent's book,
+    the one strategy the baselines exist to judge.
+    """
+    # --research needs a model; a plain pick does not (like harvest).
+    try:
+        config = load_config() if with_research else load_config_for_harvest()
+    except ValueError as exc:
+        _fail(str(exc))
+        return
+
+    if not config.db_path.exists():
+        _fail(f"No fundamentals database at {config.db_path}. Run `scout ingest` first.")
+        return
+
+    pick_day = _parse_day(as_of) if as_of else date.today()
+    prices = _load_prices(price, prices_file)
+
+    research_client = None
+    if with_research:
+        research_client = build_client(config, use_cache=not no_cache, prompt_version="research/1")
+
+    try:
+        batch = run_pick(
+            config,
+            as_of=pick_day,
+            prices=prices,
+            top=top,
+            research_client=research_client,
+        )
+    except (HarnessError, LedgerError) as exc:
+        _fail(f"{type(exc).__name__}: {exc}")
+        return
+
+    _render_pick(batch, config.ledger_path)
+
+
+def _render_pick(batch: PickBatch, ledger_path: Path) -> None:
+    console.print(
+        f"[bold]Picked[/bold] {batch.as_of}  ·  universe {batch.universe_size}  ·  "
+        f"run [dim]{batch.run_id}[/dim]"
+    )
+    table = Table("strategy", "picks", "priced", "note", title="\nPre-registered books")
+    table.columns[3].style = "dim"
+    for sb in batch.strategies:
+        priced = f"[green]{sb.n_priced}[/green]" if sb.n_priced else "0"
+        table.add_row(sb.strategy.value, str(sb.n_picks), priced, escape(sb.note or ""))
+    console.print(table)
+    console.print(
+        f"\nWrote [green]{batch.total_written}[/green] pick(s) to {ledger_path}."
+    )
+    for note in batch.notes:
+        console.print(f"[dim]{escape(note)}[/dim]")
+
+
+@app.command(name="score")
+def score_cmd(
+    price: Annotated[
+        list[str] | None,
+        typer.Option("--price", help="Forward (exit) price, ENTITY=VALUE (repeatable)."),
+    ] = None,
+    prices_file: Annotated[
+        str | None, typer.Option("--prices", help="JSON file of entity_id -> forward price.")
+    ] = None,
+    as_of: Annotated[
+        str | None, typer.Option("--as-of", help="Exit date, YYYY-MM-DD (default: today).")
+    ] = None,
+    cost_bps: Annotated[
+        float, typer.Option("--cost-bps", help="Round-trip cost in basis points.")
+    ] = DEFAULT_COST_BPS,
+) -> None:
+    """Grade the pre-registered picks against forward prices, honestly.
+
+    Reports each strategy's full return distribution (not a lone hit rate), the
+    agent measured against the three dumb baselines, and -- above all -- a loud
+    warning when the sample is too small to mean anything. If the agent does not
+    beat the EV/EBIT decile, this says so: the LLM layer is then cost, not signal.
+    """
+    try:
+        config = load_config_for_harvest()
+    except ValueError as exc:
+        _fail(str(exc))
+        return
+
+    ledger = Ledger(config.ledger_path)
+    if not ledger.exists():
+        _fail(
+            f"No ledger at {config.ledger_path}. Run `scout pick` first to pre-register "
+            "picks; scoring needs a book that was recorded before the outcome."
+        )
+        return
+
+    try:
+        picks = ledger.read()
+    except LedgerError as exc:
+        _fail(str(exc))
+        return
+    if not picks:
+        _fail("The ledger is empty. Run `scout pick` to pre-register a book first.")
+        return
+
+    exit_day = _parse_day(as_of) if as_of else date.today()
+    forward_prices = _load_prices(price, prices_file)
+    if not forward_prices:
+        _fail(
+            "No forward prices supplied. Pass --prices <file> or --price ENTITY=VALUE so "
+            "the picks can be graded against what price actually did."
+        )
+        return
+
+    result = evaluate(picks, forward_prices, as_of_exit=exit_day, cost_bps=cost_bps)
+    _render_score(result)
+
+
+def _render_score(result: Evaluation) -> None:
+    console.print(
+        f"[bold]Scored[/bold] as of {result.as_of_exit}  ·  {result.total_scored} graded pick(s)  "
+        f"·  [dim]{result.cost_bps:.0f} bps round-trip cost[/dim]"
+    )
+
+    table = Table(
+        "strategy", "book", "graded", "return", "median", "p10", "p90", "hit",
+        title="\nForward returns by strategy",
+    )
+    for strategy in Strategy:
+        score = result.scores.get(strategy)
+        if score is None:
+            continue
+        _add_score_row(table, score)
+    console.print(table)
+
+    # The agent-vs-baseline verdicts only mean something once an agent book was
+    # recorded (scout pick --research). Without one, the baselines still stand on
+    # their own above -- so skip an all-"no agent book" block rather than print it.
+    if Strategy.AGENT in result.scores and result.comparisons:
+        console.print("\n[bold]Agent vs baselines[/bold]")
+        for comp in result.comparisons:
+            style = "green" if (comp.delta or 0) > 0 else "red"
+            delta = f"[{style}]{comp.delta:+.1%}[/{style}]" if comp.delta is not None else "—"
+            console.print(f"  vs {comp.baseline.value:<16} {delta}  [dim]{escape(comp.verdict)}[/dim]")
+
+    for score in result.scores.values():
+        for note in score.notes:
+            console.print(f"[dim]{score.strategy.value}: {escape(note)}[/dim]")
+
+    # The most important thing this command prints, so it goes last and loud.
+    for warning in result.warnings:
+        console.print(f"\n[bold yellow]{escape(warning)}[/bold yellow]")
+
+
+def _add_score_row(table: Table, score: StrategyScore) -> None:
+    dist = score.distribution
+    if dist is None:
+        table.add_row(score.strategy.value, str(score.n_picks), "0", "—", "—", "—", "—", "—")
+        return
+    table.add_row(
+        score.strategy.value,
+        str(score.n_picks),
+        str(score.n_scored),
+        _pct(score.portfolio_return),
+        _pct(dist.median),
+        _pct(dist.p10),
+        _pct(dist.p90),
+        f"{dist.hit_rate:.0%}",
+    )
+
+
+def _pct(value: float | None) -> str:
+    if value is None:
+        return "—"
+    color = "green" if value > 0 else "red" if value < 0 else ""
+    text = f"{value:+.1%}"
+    return f"[{color}]{text}[/{color}]" if color else text
 
 
 # ------------------------------------------------------------------ llm-check

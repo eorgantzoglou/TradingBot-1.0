@@ -29,7 +29,7 @@ section on what the evidence does and does not support.
 | 3. Metrics | **done** — valuation, quality, risk, liquidity; deterministic, golden-tested |
 | 4. Screen | **done** — hard excludes, SIC/sector enrichment, within-cohort ranking |
 | 5. Research agents | **done** — cited extraction, citation verification, debate, veto memo |
-| 6. Ledger + forward scoring | not started |
+| 6. Ledger + forward scoring | **done** — pre-registered picks, forward scoring vs three dumb baselines |
 
 ## Quickstart
 
@@ -51,6 +51,8 @@ uv run scout metrics -e 66740 --price 150   # all metrics for one entity
 uv run scout enrich                # fetch SIC/sector, exchange, filing history
 uv run scout screen --show-excluded         # ranked candidate watchlist
 uv run scout research --top 5      # cited LLM research over the top candidates
+uv run scout pick --prices p.json  # pre-register today's paper picks per strategy
+uv run scout score --prices q.json # grade past picks vs the three dumb baselines
 uv run scout llm-check             # exercise the whole harness, no data needed
 ```
 
@@ -84,6 +86,8 @@ it is the single highest-value thing in this repo, and it costs nothing.
 | `scout enrich` | Fetch entity profiles (SIC/sector, exchange, filing history) |
 | `scout screen [--show-excluded]` | Ranked candidate watchlist |
 | `scout research [--top N \| -e ID]` | Cited LLM research + veto memo (needs a model) |
+| `scout pick [--prices f] [--research]` | Pre-register today's paper picks per strategy into the ledger |
+| `scout score --prices f` | Grade the ledger's picks against forward prices, vs three baselines |
 | `scout llm-check` | Round-trip the harness on a synthetic filing |
 
 Add `-v` before the subcommand for INFO logging: `scout -v harvest --days 1`.
@@ -266,6 +270,48 @@ the ranking is junk, no LLM will fix it. At the current tiny data scale it is
 demonstrating the machinery; it becomes a real microcap watchlist as the daily
 harvest accumulates small-cap filers and a price feed is wired in.
 
+### Ledger and forward scoring, briefly
+
+`scout pick` and `scout score` are the honesty layer. No retail vendor sells
+point-in-time fundamentals outside the US (see the harvest warning above), so the
+screen cannot be honestly backtested — which means **forward paper trading is the
+only credible evidence** the picks are any good. It only counts if the pick is
+recorded *before* the outcome is known, so `scout pick` pre-registers a
+timestamped, append-only book for every strategy at once:
+
+- the **agent** (survived the screen *and* the research pipeline without a veto),
+- the **screen** itself (the composite rank, no LLM),
+- and the three dumb baselines it has to beat — the **equal-weighted universe**,
+  the **EV/EBIT decile** within each cohort, and a **gradient-boosted tree** on
+  the same tabular features (Levy 2026 found a GBDT beats the best commercial LLM
+  with no look-ahead).
+
+`scout score` grades them all on the identical forward window. Three disciplines
+carried over verbatim in spirit from the old bot's `score.js`:
+
+- **The distribution, not the hit rate.** Returns are so right-skewed
+  (Bessembinder 2018) that a strategy can be right 55% of the time and still lose
+  money, so every strategy reports its full quantile spread with the median
+  stated next to the mean; the hit rate is shown but never alone.
+- **Say when the sample is too small.** Below ~30 scored picks the verdict is
+  "insufficient evidence" — a 70% hit rate on a handful of picks is what a coin
+  flip returns routinely, and the report says so loudly.
+- **Name the bar.** If the agent does not beat the EV/EBIT decile, the evaluation
+  states plainly that the LLM research layer is cost, not signal.
+
+Everything degrades honestly, the same as the layers beneath it. There is no
+price feed yet (a documented deferral), so prices are supplied by hand
+(`--price ID=VALUE` or a `--prices` JSON file) and `evaluate.py` takes them as an
+input rather than reaching for a vendor — a name with no price is recorded
+ungradeable, never guessed to zero. The GBDT baseline needs labeled forward-return
+history to train, which does not exist until picks have been scored, so it
+reports INSUFFICIENT (and its `lightgbm` dependency is an optional `gbdt` extra)
+until the forward archive is deep enough. The ledger is one JSON line per pick —
+the old `logger.js` append-only pattern — so it is trivially parseable, survives
+a crash mid-run, and never rewrites the history a pre-registration record depends
+on. A write that fails, or a corrupt line on read, raises rather than silently
+losing a pick.
+
 ### The harness, briefly
 
 The design rule that shapes everything: **the LLM is a reader, not a calculator,
@@ -307,7 +353,7 @@ uv run pytest -q
 uv run ruff check src tests
 ```
 
-204 tests, no network — every source is exercised through `respx` mocks.
+552 tests, no network — every source is exercised through `respx` mocks.
 
 One lesson already learned the hard way: mocked tests only prove the code
 matches the fixture. Two real bugs in the SEC parser (a missing `edgar/` URL

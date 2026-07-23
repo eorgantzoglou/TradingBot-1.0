@@ -118,6 +118,12 @@ class Config:
     def db_path(self) -> Path:
         return self.data_dir / "scout.duckdb"
 
+    @property
+    def ledger_path(self) -> Path:
+        """Append-only paper-trade ledger (phase 6). Lives beside the archive and
+        db so the whole point-in-time record is one directory to back up."""
+        return self.data_dir / "ledger.jsonl"
+
     def validate(self) -> list[str]:
         problems = list(self.llm.validate())
         if not self.user_agent:
