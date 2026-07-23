@@ -621,7 +621,13 @@ def research(
     )
 
     try:
-        reports = asyncio.run(research_entities(config, entity_ids, client=client))
+        # Thread the configured reasoning effort through: a hybrid-thinking local
+        # model (Qwen3.x, DeepSeek-R1) defaults to thinking ON, which for the
+        # extraction/debate calls burns the whole output budget on reasoning and
+        # returns an empty answer. REASONING_EFFORT=none is what turns that off.
+        reports = asyncio.run(
+            research_entities(config, entity_ids, client=client, effort=config.llm.effort)  # type: ignore[arg-type]
+        )
     except HarnessError as exc:
         _fail(f"{type(exc).__name__}: {exc}")
         return
@@ -775,6 +781,9 @@ def pick_cmd(
             prices=prices,
             top=top,
             research_client=research_client,
+            # Same reason as `scout research`: without the configured effort a
+            # hybrid-thinking local model thinks by default and returns no answer.
+            effort=config.llm.effort,  # type: ignore[arg-type]
         )
     except (HarnessError, LedgerError) as exc:
         _fail(f"{type(exc).__name__}: {exc}")

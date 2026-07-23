@@ -123,6 +123,30 @@ async def test_pipeline_drops_fabricated_citation(make_client, all_modes):
     assert report.fabrication_rate == 1.0
 
 
+async def test_effort_is_threaded_to_every_llm_call(make_client, all_modes):
+    """Regression: a hybrid-thinking local model (Qwen3.x) thinks by default and
+    returns an empty answer unless effort='none' reaches the call. This broke live
+    because the `scout research` CLI omitted effort; here we pin that the pipeline
+    forwards whatever effort it is given to every stage (extract, debate, memo)."""
+    client = make_client(
+        script=[
+            _extract_json(real_quote=True),
+            _bull(),
+            _bear(),
+            _skeptic(disqualifying=False),
+            _memo("no_veto"),
+        ],
+        capabilities=all_modes,
+    )
+
+    await research_candidate(_pack(), client=client, name="Co", effort="none")
+
+    # All five calls must carry the effort; a single missing one is the empty-answer
+    # failure mode on a thinking model.
+    assert client.calls, "expected the pipeline to have made calls"
+    assert all(call["effort"] == "none" for call in client.calls)
+
+
 async def test_skeptic_can_veto_without_critical_finding(make_client, all_modes):
     client = make_client(
         script=[
