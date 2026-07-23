@@ -9,9 +9,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import math
+import sys
 from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -47,10 +49,32 @@ from scout.research.pipeline import research_entities
 from scout.screen.profile import enrich
 from scout.screen.screen import run_screen
 
+
+def _force_utf8_output() -> None:
+    """Make console output encode-safe on non-UTF-8 terminals.
+
+    A Windows console defaults to the locale codepage (cp1253 on a Greek system,
+    cp1252 on a Western one), which cannot encode the box-drawing, bullet and
+    check/cross glyphs the output uses -- and Python raises UnicodeEncodeError
+    mid-render rather than degrading, which crashed `scout research` on exactly
+    the memo it had just successfully produced. Forcing UTF-8 with `errors=
+    "replace"` means a glyph the terminal genuinely cannot show is substituted,
+    never fatal. Done before the Console is built so rich picks up the encoding.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        # A redirected or already-detached stream may refuse; leave it as it is.
+        with contextlib.suppress(ValueError, OSError):
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 app = typer.Typer(
     add_completion=False,
     help="Global deep-research equity scout: harvest primary filings, research them, measure the result.",
 )
+_force_utf8_output()
 console = Console()
 
 
