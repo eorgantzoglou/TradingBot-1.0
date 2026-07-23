@@ -3,6 +3,7 @@
     scout doctor                    check configuration and source availability
     scout harvest --days 3          collect primary filings into the archive
     scout status                    what the archive currently holds
+    scout ui                        live-updating local page of generated reports
     scout llm-check                 round-trip the whole harness on a synthetic task
 """
 
@@ -43,7 +44,7 @@ from scout.harness.protocol import Message
 from scout.harness.structured import complete_structured
 from scout.metrics.base import MarketData
 from scout.metrics.report import compute_metrics
-from scout.output import write_brief, write_reports
+from scout.output import index_entry, pending_entry, write_brief, write_report, write_run_index
 from scout.portfolio.evaluate import DEFAULT_COST_BPS, evaluate, scope_to_vintage
 from scout.portfolio.ledger import Ledger, LedgerError
 from scout.portfolio.models import Evaluation, Strategy, StrategyScore
@@ -52,6 +53,7 @@ from scout.research.models import Verdict
 from scout.research.pipeline import research_entities
 from scout.screen.profile import enrich
 from scout.screen.screen import run_screen
+from scout.ui import serve as serve_ui
 
 
 def _force_utf8_output() -> None:
@@ -658,13 +660,50 @@ def research(
         f"[bold]Researching[/bold] {len(entity_ids)} candidate(s) with {client.model} ...\n"
     )
 
+    out_dir = Path(out) if out else config.reports_dir
+    index_entries: list[dict] = []
+    entries_by_entity: dict[str, dict] = {}
+
+    if not no_save:
+        # Seed the run index with every requested candidate as "pending" up
+        # front, so a live viewer can show the whole batch immediately and
+        # watch each row flip to "done" as `_on_report` fires below.
+        for entity_id in entity_ids:
+            entry = pending_entry(entity_id)
+            index_entries.append(entry)
+            entries_by_entity[entity_id] = entry
+        write_run_index(out_dir, run_id=run_id, model=client.model, entries=index_entries)
+
+    def _on_report(report) -> None:  # type: ignore[no-untyped-def]
+        # Fires as each candidate finishes (concurrently, so out of request
+        # order). Saving here -- not after the whole batch -- is what lets a
+        # live viewer (`scout ui`) show a memo the moment it lands on disk.
+        _render_memo(report)
+        if no_save:
+            return
+        md_path, json_path = write_report(report, out_dir, run_id=run_id, model=client.model)
+        done = index_entry(report, md_path, json_path)
+        existing = entries_by_entity.get(report.entity_id)
+        if existing is not None:
+            existing.update(done)
+        else:
+            index_entries.append(done)
+            entries_by_entity[report.entity_id] = done
+        write_run_index(out_dir, run_id=run_id, model=client.model, entries=index_entries)
+
     try:
         # Thread the configured reasoning effort through: a hybrid-thinking local
         # model (Qwen3.x, DeepSeek-R1) defaults to thinking ON, which for the
         # extraction/debate calls burns the whole output budget on reasoning and
         # returns an empty answer. REASONING_EFFORT=none is what turns that off.
         reports = asyncio.run(
-            research_entities(config, entity_ids, client=client, effort=config.llm.effort)  # type: ignore[arg-type]
+            research_entities(
+                config,
+                entity_ids,
+                client=client,
+                effort=config.llm.effort,  # type: ignore[arg-type]
+                on_report=_on_report,
+            )
         )
     except HarnessError as exc:
         _fail(f"{type(exc).__name__}: {exc}")
@@ -674,13 +713,17 @@ def research(
         _fail("No candidate could be researched (missing filings or metrics).")
         return
 
-    for report in reports:
-        _render_memo(report)
-
     if not no_save:
-        out_dir = Path(out) if out else config.reports_dir
-        written = write_reports(reports, out_dir, run_id=run_id, model=client.model)
-        memo_count = sum(1 for p in written if p.suffix == ".md")
+        # Any entity_id that never reached `_on_report` (no filings/metrics,
+        # research_entities skips it silently) stays "pending" forever
+        # otherwise -- flip those to "skipped" so the index reflects reality.
+        stuck = [e for e in index_entries if e["status"] == "pending"]
+        for entry in stuck:
+            entry["status"] = "skipped"
+        if stuck:
+            write_run_index(out_dir, run_id=run_id, model=client.model, entries=index_entries)
+
+        memo_count = sum(1 for e in index_entries if e["status"] == "done")
         console.print(
             f"[dim]Saved {memo_count} memo(s) to {out_dir}"
             f"{' (with JSON sidecars)' if memo_count else ''}.[/dim]"
@@ -820,6 +863,37 @@ def _render_brief(brief) -> None:  # type: ignore[no-untyped-def]
         )
     for warning in brief.warnings:
         console.print(f"  [dim]! {escape(warning)}[/dim]")
+
+
+# -------------------------------------------------------------------------- ui
+
+
+@app.command(name="ui")
+def ui_cmd(
+    reports: Annotated[
+        str | None, typer.Option("--reports", help="Directory to watch (default: data/reports).")
+    ] = None,
+    port: Annotated[int, typer.Option("--port", help="Local port to serve on.")] = 8765,
+    no_browser: Annotated[
+        bool, typer.Option("--no-browser", help="Don't auto-open a browser tab.")
+    ] = False,
+) -> None:
+    """Serve a live-updating local page showing reports as they're generated.
+
+    Watches `reports_dir` (Markdown + JSON from `scout research` and
+    `scout investigate`) and pushes an update to any open browser tab the
+    moment a new memo lands on disk -- run this in one terminal, `scout
+    research` in another. Read-only, local-only, no data leaves the machine.
+    """
+    if reports:
+        reports_dir = Path(reports)
+    else:
+        try:
+            reports_dir = load_config_for_harvest().reports_dir
+        except ValueError:
+            reports_dir = Path("data/reports")
+
+    serve_ui(reports_dir, port=port, open_browser=not no_browser)
 
 
 # ----------------------------------------------------------------- pick / score

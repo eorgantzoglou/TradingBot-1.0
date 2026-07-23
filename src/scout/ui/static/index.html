@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scout — reports</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0b0d10;
+    --panel: #14171c;
+    --panel-2: #1b1f26;
+    --border: #262b33;
+    --text: #e7e9ec;
+    --dim: #8a9099;
+    --dimmer: #565c66;
+    --veto: #f2555a;
+    --veto-bg: rgba(242, 85, 90, .12);
+    --ok: #3ecf8e;
+    --ok-bg: rgba(62, 207, 142, .12);
+    --pending: #d9a441;
+    --pending-bg: rgba(217, 164, 65, .10);
+    --accent: #5b9dff;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+  }
+  body { padding-bottom: 4rem; }
+  a { color: var(--accent); }
+
+  header {
+    position: sticky; top: 0; z-index: 10;
+    display: flex; align-items: center; gap: .75rem;
+    padding: .9rem 1.25rem;
+    background: rgba(11,13,16,.85);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 {
+    font-size: 1rem; font-weight: 650; margin: 0;
+    letter-spacing: .02em;
+  }
+  header .path { color: var(--dimmer); font-size: .78rem; font-family: ui-monospace, Consolas, monospace; }
+  header .spacer { flex: 1; }
+  .live-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--dimmer);
+    box-shadow: 0 0 0 0 rgba(62,207,142,.6);
+  }
+  .live-dot.on {
+    background: var(--ok);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(62,207,142,.55); }
+    70%  { box-shadow: 0 0 0 6px rgba(62,207,142,0); }
+    100% { box-shadow: 0 0 0 0 rgba(62,207,142,0); }
+  }
+  .live-label { color: var(--dim); font-size: .78rem; }
+
+  main { max-width: 920px; margin: 0 auto; padding: 1.25rem; }
+
+  .empty {
+    color: var(--dim); text-align: center; padding: 4rem 1rem;
+  }
+  .empty .big { font-size: 1.05rem; color: var(--text); margin-bottom: .35rem; }
+
+  .day-heading {
+    font-size: .78rem; color: var(--dimmer); text-transform: uppercase;
+    letter-spacing: .08em; margin: 2rem 0 .6rem; padding-left: .1rem;
+  }
+  .day-heading:first-child { margin-top: 0; }
+
+  .run {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: .9rem;
+    overflow: hidden;
+  }
+  .run-head {
+    display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap;
+    padding: .65rem .9rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel-2);
+    font-size: .8rem; color: var(--dim);
+  }
+  .run-head .model { color: var(--text); font-weight: 600; }
+  .run-head .tally { margin-left: auto; color: var(--dim); }
+  .run-head .tally b { color: var(--text); }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+    gap: .6rem;
+    padding: .7rem;
+  }
+
+  .card {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: .7rem .8rem;
+    cursor: pointer;
+    transition: border-color .15s ease;
+  }
+  .card:hover { border-color: #3a4048; }
+  .card.expanded { grid-column: 1 / -1; cursor: default; }
+
+  .card-top { display: flex; align-items: flex-start; gap: .5rem; }
+  .card-name { font-weight: 600; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .card-id { color: var(--dimmer); font-size: .74rem; font-family: ui-monospace, Consolas, monospace; }
+
+  .badge {
+    display: inline-block; padding: .12rem .5rem; border-radius: 999px;
+    font-size: .68rem; font-weight: 700; letter-spacing: .03em; text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .badge.veto { color: var(--veto); background: var(--veto-bg); }
+  .badge.ok   { color: var(--ok); background: var(--ok-bg); }
+  .badge.pending { color: var(--pending); background: var(--pending-bg); }
+  .badge.skipped { color: var(--dimmer); background: rgba(255,255,255,.04); }
+
+  .headline { color: var(--dim); margin-top: .4rem; font-size: .82rem; }
+  .card.expanded .headline { color: var(--text); font-size: .9rem; }
+
+  .pending-bar {
+    height: 3px; border-radius: 2px; margin-top: .55rem;
+    background: linear-gradient(90deg, transparent, var(--pending), transparent);
+    background-size: 200% 100%;
+    animation: shimmer 1.6s linear infinite;
+  }
+  @keyframes shimmer { to { background-position: -200% 0; } }
+
+  .detail { margin-top: .9rem; display: flex; flex-direction: column; gap: 1rem; }
+  .detail h4 {
+    margin: 0 0 .35rem; font-size: .72rem; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--dimmer);
+  }
+  .detail p { margin: 0; color: var(--text); }
+  .reasons li { color: var(--veto); }
+  .finding {
+    border-left: 2px solid var(--border); padding-left: .6rem; margin-bottom: .6rem;
+  }
+  .finding:last-child { margin-bottom: 0; }
+  .finding .meta { display: flex; gap: .4rem; align-items: center; margin-bottom: .2rem; }
+  .sev { font-size: .68rem; font-weight: 700; text-transform: uppercase; }
+  .sev.critical, .sev.high { color: var(--veto); }
+  .sev.medium { color: var(--accent); }
+  .sev.low { color: var(--dim); }
+  .finding .cat { color: var(--dim); font-size: .74rem; }
+  .finding .claim { margin: .15rem 0; }
+  .finding blockquote {
+    margin: .3rem 0 0; padding: .4rem .6rem;
+    background: var(--panel); border-radius: 6px;
+    color: var(--dim); font-size: .82rem; font-style: italic;
+  }
+  .finding .src { color: var(--dimmer); font-size: .72rem; margin-top: .2rem; font-family: ui-monospace, Consolas, monospace; }
+
+  .debate { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  .debate .col h4.bull { color: var(--ok); }
+  .debate .col h4.bear { color: var(--veto); }
+  .debate ul { margin: 0; padding-left: 1.1rem; }
+  .skeptic { grid-column: 1 / -1; }
+  .skeptic .verdict { font-weight: 600; }
+  .skeptic .verdict.disqualifying { color: var(--veto); }
+  .skeptic .verdict.clear { color: var(--ok); }
+
+  .steps ol { margin: 0; padding-left: 1.2rem; }
+  .steps li { margin-bottom: .3rem; }
+  .steps .tool { font-family: ui-monospace, Consolas, monospace; color: var(--accent); }
+  .steps .fail { color: var(--veto); }
+
+  .warnings { color: var(--pending); font-size: .8rem; }
+  .warnings li { margin-bottom: .15rem; }
+
+  .none { color: var(--dimmer); font-style: italic; font-size: .84rem; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Scout</h1>
+  <span class="path" id="reports-path"></span>
+  <span class="spacer"></span>
+  <span class="live-label" id="live-label">connecting…</span>
+  <span class="live-dot" id="live-dot"></span>
+</header>
+
+<main id="main">
+  <div class="empty">
+    <div class="big">Loading…</div>
+  </div>
+</main>
+
+<script>
+const main = document.getElementById('main');
+const liveDot = document.getElementById('live-dot');
+const liveLabel = document.getElementById('live-label');
+const reportsPath = document.getElementById('reports-path');
+const expanded = new Set(); // keys that should render open across re-renders
+
+function esc(s) {
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+function badge(status, vetoed) {
+  if (status === 'pending') return `<span class="badge pending">researching…</span>`;
+  if (status === 'skipped') return `<span class="badge skipped">skipped</span>`;
+  return vetoed
+    ? `<span class="badge veto">veto</span>`
+    : `<span class="badge ok">no veto</span>`;
+}
+
+function findingsHtml(findings, kind) {
+  if (!findings || !findings.length) return '<p class="none">No findings survived citation verification.</p>';
+  return findings.map(f => {
+    if (kind === 'research') {
+      return `
+        <div class="finding">
+          <div class="meta">
+            <span class="sev ${esc(f.severity)}">${esc(f.severity)}</span>
+            <span class="cat">${esc(f.category)}</span>
+          </div>
+          <div class="claim">${esc(f.claim)}</div>
+          <blockquote>${esc(f.quoted_span)}</blockquote>
+          <div class="src">filing ${esc(f.source_accession)}</div>
+        </div>`;
+    }
+    return `
+      <div class="finding">
+        <div class="meta">${f.is_red_flag ? '<span class="sev critical">red flag</span>' : ''}</div>
+        <div class="claim">${esc(f.claim)}</div>
+        <blockquote>${esc(f.quoted_span)}</blockquote>
+        <div class="src">source ${esc(f.source)}</div>
+      </div>`;
+  }).join('');
+}
+
+function researchDetail(d) {
+  const veto = d.verdict === 'veto';
+  return `
+    <div class="detail">
+      <div><h4>Thesis</h4><p>${esc(d.memo.thesis)}</p></div>
+      ${veto ? `<div><h4>Veto reasons</h4><ul class="reasons">${
+        d.memo.veto_reasons.map(r => `<li>${esc(r)}</li>`).join('')
+      }</ul></div>` : ''}
+      <div><h4>Cited findings (${d.verified_findings.length})</h4>${findingsHtml(d.verified_findings, 'research')}</div>
+      <div class="debate">
+        <div class="col"><h4 class="bull">Bull</h4><ul>${d.bull.points.map(p => `<li>${esc(p)}</li>`).join('')}</ul></div>
+        <div class="col"><h4 class="bear">Bear</h4><ul>${d.bear.points.map(p => `<li>${esc(p)}</li>`).join('')}</ul></div>
+        <div class="skeptic">
+          <h4>Skeptic</h4>
+          <p class="verdict ${d.skeptic.disqualifying ? 'disqualifying' : 'clear'}">${
+            d.skeptic.disqualifying ? 'Disqualifying' : 'Not disqualifying'
+          }</p>
+          <p>${esc(d.skeptic.reasoning)}</p>
+        </div>
+      </div>
+      ${d.warnings && d.warnings.length ? `<div><h4>Data quality</h4><ul class="warnings">${
+        d.warnings.map(w => `<li>${esc(w)}</li>`).join('')
+      }</ul></div>` : ''}
+    </div>`;
+}
+
+function briefDetail(b) {
+  const veto = b.verdict === 'veto';
+  return `
+    <div class="detail">
+      <div><h4>Thesis</h4><p>${esc(b.thesis)}</p></div>
+      <div><h4>Recommendation</h4><p>${esc(b.recommendation)}</p></div>
+      ${veto ? `<div><h4>Veto reasons</h4><ul class="reasons">${
+        b.veto_reasons.map(r => `<li>${esc(r)}</li>`).join('')
+      }</ul></div>` : ''}
+      <div><h4>Findings (${b.verified_findings.length})</h4>${findingsHtml(b.verified_findings, 'investigate')}</div>
+      <div class="steps">
+        <h4>What the agent did</h4>
+        ${b.steps && b.steps.length ? `<ol>${b.steps.map(s => `
+          <li><span class="tool">${esc(s.tool)}</span>${s.ok ? '' : ' <span class="fail">(failed)</span>'} — ${esc(s.thought)}</li>
+        `).join('')}</ol>` : '<p class="none">No tools were called.</p>'}
+      </div>
+      ${b.warnings && b.warnings.length ? `<div><h4>Data quality</h4><ul class="warnings">${
+        b.warnings.map(w => `<li>${esc(w)}</li>`).join('')
+      }</ul></div>` : ''}
+    </div>`;
+}
+
+function entityCard(entry, runId) {
+  const key = `${runId}:${entry.entity_id}`;
+  const isExpanded = entry.status === 'done' && expanded.has(key);
+  const clickable = entry.status === 'done';
+  const headline = entry.detail ? entry.detail.memo.headline : '';
+  return `
+    <div class="card ${isExpanded ? 'expanded' : ''}" data-key="${esc(key)}" ${clickable ? 'data-clickable="1"' : ''}>
+      <div class="card-top">
+        <div>
+          <div class="card-name">${esc(entry.name || entry.entity_id)}</div>
+          <div class="card-id">${esc(entry.entity_id)}</div>
+        </div>
+        <span class="spacer" style="flex:1"></span>
+        ${badge(entry.status, entry.vetoed)}
+      </div>
+      ${entry.status === 'done'
+        ? `<div class="headline">${esc(isExpanded ? headline : truncate(headline, 90))}</div>`
+        : entry.status === 'pending'
+          ? `<div class="pending-bar"></div>`
+          : `<div class="headline">no filings/metrics available</div>`
+      }
+      ${isExpanded && entry.detail ? researchDetail(entry.detail) : ''}
+    </div>`;
+}
+
+function briefCard(brief) {
+  const key = `brief:${brief.json}`;
+  const isExpanded = expanded.has(key);
+  const veto = brief.verdict === 'veto';
+  return `
+    <div class="card ${isExpanded ? 'expanded' : ''}" data-key="${esc(key)}" data-clickable="1">
+      <div class="card-top">
+        <div>
+          <div class="card-name">${esc(brief.subject)}</div>
+          ${brief.entity_id ? `<div class="card-id">${esc(brief.entity_id)}</div>` : ''}
+        </div>
+        <span class="spacer" style="flex:1"></span>
+        ${badge('done', veto)}
+      </div>
+      <div class="headline">${esc(isExpanded ? brief.headline : truncate(brief.headline, 90))}</div>
+      ${isExpanded ? briefDetail(brief) : ''}
+    </div>`;
+}
+
+function truncate(s, n) {
+  if (!s) return '';
+  return s.length > n ? s.slice(0, n - 1) + '…' : s;
+}
+
+function runBlock(run) {
+  const done = run.entries.filter(e => e.status === 'done').length;
+  const total = run.entries.length;
+  return `
+    <div class="run">
+      <div class="run-head">
+        <span class="model">${esc(run.model)}</span>
+        <span>run ${esc(run.run_id)}</span>
+        <span class="tally"><b>${done}/${total}</b> done · <b>${run.vetoed}</b> vetoed</span>
+      </div>
+      <div class="grid">
+        ${run.entries.map(e => entityCard(e, run.run_id)).join('')}
+      </div>
+    </div>`;
+}
+
+function render(snapshot) {
+  reportsPath.textContent = snapshot.reports_dir || '';
+
+  if (!snapshot.days || !snapshot.days.length) {
+    main.innerHTML = `
+      <div class="empty">
+        <div class="big">No reports yet</div>
+        <div>Run <code>scout research</code> or <code>scout investigate</code> — this page updates live.</div>
+      </div>`;
+    return;
+  }
+
+  main.innerHTML = snapshot.days.map(day => `
+    <div class="day-heading">${esc(day.date)}</div>
+    ${day.runs.map(runBlock).join('')}
+    ${day.briefs.length ? `
+      <div class="run">
+        <div class="run-head"><span class="model">investigations</span></div>
+        <div class="grid">${day.briefs.map(briefCard).join('')}</div>
+      </div>` : ''}
+  `).join('');
+}
+
+main.addEventListener('click', (ev) => {
+  const card = ev.target.closest('.card[data-clickable="1"]');
+  if (!card) return;
+  const key = card.dataset.key;
+  if (expanded.has(key)) expanded.delete(key); else expanded.add(key);
+  refresh();
+});
+
+let lastSnapshot = null;
+
+async function refresh() {
+  try {
+    const res = await fetch('/api/reports', { cache: 'no-store' });
+    lastSnapshot = await res.json();
+    render(lastSnapshot);
+  } catch (err) {
+    // leave the last good render up; the SSE reconnect loop will retry
+  }
+}
+
+function connect() {
+  const es = new EventSource('/api/events');
+  es.addEventListener('open', () => {
+    liveDot.classList.add('on');
+    liveLabel.textContent = 'live';
+  });
+  es.addEventListener('error', () => {
+    liveDot.classList.remove('on');
+    liveLabel.textContent = 'reconnecting…';
+  });
+  es.addEventListener('update', refresh);
+}
+
+refresh();
+connect();
+</script>
+</body>
+</html>

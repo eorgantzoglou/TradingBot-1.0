@@ -28,6 +28,113 @@ from scout.research.models import Verdict
 from scout.research.pipeline import ResearchReport
 
 
+def write_report(
+    report: ResearchReport,
+    out_dir: Path,
+    *,
+    run_id: str,
+    model: str,
+    generated: datetime | None = None,
+) -> list[Path]:
+    """Write one report as Markdown + JSON. Returns [md_path, json_path].
+
+    Split out from `write_reports` so a caller can save each candidate the
+    moment its research finishes, instead of waiting for the whole batch --
+    that's what lets a live viewer show reports as they are generated.
+    """
+    generated = generated or datetime.now(UTC)
+    day_dir = out_dir / generated.date().isoformat()
+    day_dir.mkdir(parents=True, exist_ok=True)
+
+    base = f"{report.entity_id}-{_slug(report.name or report.entity_id)}"
+    md_path = day_dir / f"{base}.md"
+    json_path = day_dir / f"{base}.json"
+
+    md_path.write_text(
+        render_markdown(report, run_id=run_id, model=model, generated=generated),
+        encoding="utf-8",
+    )
+    json_path.write_text(
+        json.dumps(
+            report_to_dict(report, run_id=run_id, model=model, generated=generated),
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return [md_path, json_path]
+
+
+def index_entry(report: ResearchReport, md_path: Path, json_path: Path) -> dict[str, Any]:
+    """The `_run-<id>.json` summary row for one finished report."""
+    return {
+        "entity_id": report.entity_id,
+        "name": report.name,
+        "verdict": report.memo.verdict.value,
+        "vetoed": report.vetoed,
+        "findings": len(report.verified_findings),
+        "markdown": md_path.name,
+        "json": json_path.name,
+        "status": "done",
+    }
+
+
+def pending_entry(entity_id: str) -> dict[str, Any]:
+    """A placeholder row for a candidate whose research hasn't finished yet.
+
+    Seeded into the run index before the batch starts so a live viewer can
+    show every requested candidate immediately, then watch each one flip to
+    "done" as `index_entry` results replace it.
+    """
+    return {
+        "entity_id": entity_id,
+        "name": None,
+        "verdict": None,
+        "vetoed": False,
+        "findings": 0,
+        "markdown": None,
+        "json": None,
+        "status": "pending",
+    }
+
+
+def write_run_index(
+    out_dir: Path,
+    *,
+    run_id: str,
+    model: str,
+    entries: list[dict[str, Any]],
+    generated: datetime | None = None,
+) -> Path:
+    """(Re)write the `_run-<id>.json` index for a batch of reports.
+
+    Safe to call repeatedly with a growing `entries` list as candidates finish
+    one by one -- each call overwrites the same file with the current tally,
+    so a live viewer polling it always sees a consistent snapshot.
+    """
+    generated = generated or datetime.now(UTC)
+    day_dir = out_dir / generated.date().isoformat()
+    day_dir.mkdir(parents=True, exist_ok=True)
+
+    done = [e for e in entries if e.get("status", "done") == "done"]
+    index_path = day_dir / f"_run-{run_id}.json"
+    index_path.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "generated": generated.isoformat(),
+                "model": model,
+                "requested": len(entries),
+                "researched": len(done),
+                "vetoed": sum(1 for e in done if e["vetoed"]),
+                "entries": entries,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return index_path
+
+
 def write_reports(
     reports: list[ResearchReport],
     out_dir: Path,
@@ -41,57 +148,21 @@ def write_reports(
     `generated` is injectable so tests are deterministic; it defaults to now.
     """
     generated = generated or datetime.now(UTC)
-    day_dir = out_dir / generated.date().isoformat()
-    day_dir.mkdir(parents=True, exist_ok=True)
-
     written: list[Path] = []
     index_entries: list[dict[str, Any]] = []
 
     for report in reports:
-        base = f"{report.entity_id}-{_slug(report.name or report.entity_id)}"
-        md_path = day_dir / f"{base}.md"
-        json_path = day_dir / f"{base}.json"
-
-        md_path.write_text(
-            render_markdown(report, run_id=run_id, model=model, generated=generated),
-            encoding="utf-8",
-        )
-        json_path.write_text(
-            json.dumps(
-                report_to_dict(report, run_id=run_id, model=model, generated=generated),
-                indent=2,
-            ),
-            encoding="utf-8",
+        md_path, json_path = write_report(
+            report, out_dir, run_id=run_id, model=model, generated=generated
         )
         written += [md_path, json_path]
-        index_entries.append(
-            {
-                "entity_id": report.entity_id,
-                "name": report.name,
-                "verdict": report.memo.verdict.value,
-                "vetoed": report.vetoed,
-                "findings": len(report.verified_findings),
-                "markdown": md_path.name,
-                "json": json_path.name,
-            }
-        )
+        index_entries.append(index_entry(report, md_path, json_path))
 
-    index_path = day_dir / f"_run-{run_id}.json"
-    index_path.write_text(
-        json.dumps(
-            {
-                "run_id": run_id,
-                "generated": generated.isoformat(),
-                "model": model,
-                "researched": len(reports),
-                "vetoed": sum(1 for r in reports if r.vetoed),
-                "entries": index_entries,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
+    written.append(
+        write_run_index(
+            out_dir, run_id=run_id, model=model, entries=index_entries, generated=generated
+        )
     )
-    written.append(index_path)
     return written
 
 

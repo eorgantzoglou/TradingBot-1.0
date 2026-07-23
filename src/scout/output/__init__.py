@@ -8,18 +8,26 @@ directory, so a watchlist's analysis accumulates as a browsable record.
 
 from scout.output.report import (
     brief_to_dict,
+    index_entry,
+    pending_entry,
     render_brief,
     render_markdown,
     report_to_dict,
     write_brief,
+    write_report,
     write_reports,
+    write_run_index,
 )
 
 __all__ = [
     "brief_to_dict",
+    "index_entry",
+    "pending_entry",
     "render_brief",
     "render_markdown",
     "report_to_dict",
     "write_brief",
+    "write_report",
     "write_reports",
+    "write_run_index",
 ]

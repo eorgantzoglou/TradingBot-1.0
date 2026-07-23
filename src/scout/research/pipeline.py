@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from scout.config import Config
@@ -149,8 +150,15 @@ async def research_entities(
     market_data: dict[str, MarketData] | None = None,
     concurrency: int | None = None,
     effort: Effort | None = None,
+    on_report: Callable[[ResearchReport], None] | None = None,
 ) -> list[ResearchReport]:
-    """Research a list of entities, concurrently and fault-tolerantly."""
+    """Research a list of entities, concurrently and fault-tolerantly.
+
+    `on_report`, if given, fires as soon as each candidate finishes -- in
+    completion order, not request order, since candidates run concurrently.
+    Lets a caller (the CLI, a live UI) show a report the moment it is ready
+    instead of waiting for the whole batch to land.
+    """
     market_data = market_data or {}
     archive = Archive(config.archive_dir)
     semaphore = asyncio.Semaphore(concurrency or config.concurrency)
@@ -180,12 +188,15 @@ async def research_entities(
     async def run_one(entity_id: str, name: str | None, pack) -> ResearchReport | None:  # type: ignore[no-untyped-def]
         async with semaphore:
             try:
-                return await research_candidate(
+                report = await research_candidate(
                     pack, client=client, skeptic_client=skeptic_client, name=name, effort=effort
                 )
             except Exception as exc:
                 logger.warning("research failed for %s: %s", entity_id, exc)
                 return None
+            if on_report is not None:
+                on_report(report)
+            return report
 
     reports = await asyncio.gather(*(run_one(eid, name, pack) for eid, name, pack in packs))
     return [r for r in reports if r is not None]
