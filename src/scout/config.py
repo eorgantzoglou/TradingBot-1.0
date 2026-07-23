@@ -124,6 +124,12 @@ class Config:
         db so the whole point-in-time record is one directory to back up."""
         return self.data_dir / "ledger.jsonl"
 
+    @property
+    def reports_dir(self) -> Path:
+        """Where `scout research` saves the cited memos it produces, as Markdown
+        (to read) and JSON (to diff/automate), partitioned by day."""
+        return self.data_dir / "reports"
+
     def validate(self) -> list[str]:
         problems = list(self.llm.validate())
         if not self.user_agent:

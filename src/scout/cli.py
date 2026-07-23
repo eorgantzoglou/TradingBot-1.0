@@ -14,6 +14,7 @@ import json
 import logging
 import math
 import sys
+import uuid
 from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -40,6 +41,7 @@ from scout.harness.protocol import Message
 from scout.harness.structured import complete_structured
 from scout.metrics.base import MarketData
 from scout.metrics.report import compute_metrics
+from scout.output import write_reports
 from scout.portfolio.evaluate import DEFAULT_COST_BPS, evaluate, scope_to_vintage
 from scout.portfolio.ledger import Ledger, LedgerError
 from scout.portfolio.models import Evaluation, Strategy, StrategyScore
@@ -612,6 +614,12 @@ def research(
         int, typer.Option("--top", help="Research the top N screened candidates.")
     ] = 5,
     no_cache: Annotated[bool, typer.Option("--no-cache", help="Bypass the replay cache.")] = False,
+    out: Annotated[
+        str | None, typer.Option("--out", help="Directory for saved reports (default: data/reports).")
+    ] = None,
+    no_save: Annotated[
+        bool, typer.Option("--no-save", help="Print only; do not write report files.")
+    ] = False,
 ) -> None:
     """Run the cited LLM research pipeline over screened candidates.
 
@@ -619,6 +627,9 @@ def research(
     each anchored to a verbatim quote, verify every citation, run a bull/bear/
     skeptic debate, and write a memo. The LLM can VETO but never promote a name,
     and the verdict is decided in code. Needs a model configured in .env.
+
+    Each memo is saved as Markdown (to read) and JSON (to diff/automate) under
+    data/reports/<date>/, unless --no-save is passed.
     """
     try:
         config = load_config()
@@ -640,6 +651,7 @@ def research(
             return
 
     client = build_client(config, use_cache=not no_cache, prompt_version="research/1")
+    run_id = f"{date.today().isoformat()}-{uuid.uuid4().hex[:8]}"
     console.print(
         f"[bold]Researching[/bold] {len(entity_ids)} candidate(s) with {client.model} ...\n"
     )
@@ -662,6 +674,15 @@ def research(
 
     for report in reports:
         _render_memo(report)
+
+    if not no_save:
+        out_dir = Path(out) if out else config.reports_dir
+        written = write_reports(reports, out_dir, run_id=run_id, model=client.model)
+        memo_count = sum(1 for p in written if p.suffix == ".md")
+        console.print(
+            f"[dim]Saved {memo_count} memo(s) to {out_dir}"
+            f"{' (with JSON sidecars)' if memo_count else ''}.[/dim]"
+        )
 
     vetoed = sum(1 for r in reports if r.vetoed)
     console.print(

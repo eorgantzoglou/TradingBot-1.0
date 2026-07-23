@@ -85,7 +85,7 @@ it is the single highest-value thing in this repo, and it costs nothing.
 | `scout metrics -e ID [--price P]` | All deterministic metrics for one entity |
 | `scout enrich` | Fetch entity profiles (SIC/sector, exchange, filing history) |
 | `scout screen [--show-excluded]` | Ranked candidate watchlist |
-| `scout research [--top N \| -e ID]` | Cited LLM research + veto memo (needs a model) |
+| `scout research [--top N \| -e ID]` | Cited LLM research + veto memo (needs a model); saves Markdown + JSON to `data/reports/` |
 | `scout pick [--prices f] [--research]` | Pre-register today's paper picks per strategy into the ledger |
 | `scout score --prices f` | Grade the ledger's picks against forward prices, vs three baselines |
 | `scout llm-check` | Round-trip the harness on a synthetic filing |
@@ -233,6 +233,12 @@ Needs a model in `.env` (any OpenAI-compatible endpoint, local or hosted, or
 Anthropic). The whole pipeline is tested end to end with a scripted fake client,
 including the two guarantees that matter: a fabricated citation is dropped, and
 the model cannot escape a code-decided veto.
+
+Each memo is saved under `data/reports/<date>/` twice — Markdown to read (verdict,
+thesis, every finding with its quoted span and accession, the bull/bear/skeptic
+debate) and JSON to diff or automate — plus a per-run index. `--no-save` prints
+only; `--out` relocates. Reports are the current read; the immutable record stays
+in the ledger and the archive.
 
 ### The screen, briefly
 
