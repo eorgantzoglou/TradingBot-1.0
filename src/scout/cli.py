@@ -35,6 +35,8 @@ from scout.harness.protocol import Message
 from scout.harness.structured import complete_structured
 from scout.metrics.base import MarketData
 from scout.metrics.report import compute_metrics
+from scout.screen.profile import enrich
+from scout.screen.screen import run_screen
 
 app = typer.Typer(
     add_completion=False,
@@ -362,6 +364,119 @@ def fundamentals(
             console.print(f"\n[dim]{len(snapshot.warnings)} normalization warning(s):[/dim]")
             for warning in snapshot.warnings:
                 console.print(f"  [dim]- {warning}[/dim]")
+
+
+# ---------------------------------------------------------------------- enrich
+
+
+@app.command(name="enrich")
+def enrich_cmd(
+    reenrich: Annotated[
+        bool, typer.Option("--reenrich", help="Refetch profiles already stored.")
+    ] = False,
+    limit: Annotated[int | None, typer.Option("--limit", help="Max entities to enrich.")] = None,
+) -> None:
+    """Fetch entity profiles (SIC/sector, exchange, former names, filing history).
+
+    Uses the free SEC submissions API for US filers; other sources get a minimal
+    country-only profile until their registries are wired in. The screen uses
+    these for sector cohorts and several hard excludes.
+    """
+    try:
+        config = load_config_for_harvest()
+    except ValueError as exc:
+        _fail(str(exc))
+        return
+
+    if not config.db_path.exists():
+        _fail(f"No fundamentals database at {config.db_path}. Run `scout ingest` first.")
+        return
+
+    result = asyncio.run(enrich(config, reenrich=reenrich, limit=limit))
+    table = Table("metric", "count", title="Enrich")
+    table.add_row("enriched (SEC)", f"[green]{result.enriched}[/green]")
+    table.add_row("minimal (non-SEC)", str(result.minimal))
+    table.add_row("skipped (already have)", str(result.skipped_existing))
+    table.add_row("failed", f"[red]{result.failed}[/red]" if result.failed else "0")
+    console.print(table)
+    for error in result.errors[:10]:
+        console.print(f"  [dim]{error}[/dim]")
+
+
+# ---------------------------------------------------------------------- screen
+
+
+@app.command(name="screen")
+def screen_cmd(
+    min_cohort: Annotated[
+        int, typer.Option("--min-cohort", help="Min peers to z-score a cohort.")
+    ] = 3,
+    show_excluded: Annotated[
+        bool, typer.Option("--show-excluded", help="List excluded names and why.")
+    ] = False,
+    keep_excluded_sectors: Annotated[
+        bool, typer.Option("--keep-financials", help="Keep financials/utilities in the universe.")
+    ] = False,
+) -> None:
+    """Rank the fundamentals universe into a candidate watchlist.
+
+    Deterministic: hard excludes first, then a cheap x quality x safety composite
+    ranked within (country x accounting-standard x sector) cohorts. Eyeball this
+    before any research runs on top -- if the screen is junk, no LLM fixes it.
+    Valuation multiples need prices (not wired in yet), so today names rank on
+    quality and safety.
+    """
+    try:
+        config = load_config_for_harvest()
+    except ValueError as exc:
+        _fail(str(exc))
+        return
+
+    if not config.db_path.exists():
+        _fail(f"No fundamentals database at {config.db_path}. Run `scout ingest` first.")
+        return
+
+    result = run_screen(
+        config, min_cohort=min_cohort, include_excluded_sectors=keep_excluded_sectors
+    )
+
+    console.print(
+        f"[bold]Universe[/bold] {result.universe_size} entities  ·  "
+        f"[green]{len(result.ranked)}[/green] ranked  ·  "
+        f"[yellow]{len(result.excluded)}[/yellow] excluded"
+    )
+
+    if result.ranked:
+        table = Table("#", "entity", "name", "cohort", "score", "cheap", "qual", "safe",
+                      title="\nRanked candidates")
+        for i, cand in enumerate(result.ranked, start=1):
+            table.add_row(
+                str(i),
+                cand.entity_id,
+                escape((cand.name or "")[:28]),
+                escape(cand.cohort.label()[:32]),
+                _score(cand.composite),
+                _score(cand.cheap),
+                _score(cand.quality),
+                _score(cand.safety),
+            )
+        console.print(table)
+
+    if show_excluded and result.excluded:
+        console.print("\n[bold]Excluded[/bold]")
+        for exc in result.excluded:
+            console.print(f"  {exc.entity_id} {escape((exc.name or '')[:24])}: {escape('; '.join(exc.reasons))}")
+
+    for note in result.notes:
+        console.print(f"\n[dim]{escape(note)}[/dim]")
+
+
+def _score(value: float | None) -> str:
+    if value is None:
+        return "—"
+    color = "green" if value > 0 else "red" if value < 0 else ""
+    text = f"{value:+.2f}"
+    return f"[{color}]{text}[/{color}]" if color else text
 
 
 # --------------------------------------------------------------------- metrics

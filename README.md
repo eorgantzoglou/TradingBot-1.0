@@ -27,7 +27,7 @@ section on what the evidence does and does not support.
 | 1. LLM harness | **done** — adapters, reasoning, structured output, cache, cost |
 | 2. Data layer (parse → DuckDB) | **done** — SEC + ESEF parsed and normalized offline; FX per IAS 21 |
 | 3. Metrics | **done** — valuation, quality, risk, liquidity; deterministic, golden-tested |
-| 4. Screen | not started |
+| 4. Screen | **done** — hard excludes, SIC/sector enrichment, within-cohort ranking |
 | 5. Research agents | not started |
 | 6. Ledger + forward scoring | not started |
 
@@ -48,6 +48,8 @@ uv run scout status                # what the archive holds
 uv run scout ingest                # parse the archive into normalized fundamentals
 uv run scout fundamentals          # coverage; --entity <CIK/LEI> for one snapshot
 uv run scout metrics -e 66740 --price 150   # all metrics for one entity
+uv run scout enrich                # fetch SIC/sector, exchange, filing history
+uv run scout screen --show-excluded         # ranked candidate watchlist
 uv run scout llm-check             # exercise the whole harness, no data needed
 ```
 
@@ -78,6 +80,8 @@ it is the single highest-value thing in this repo, and it costs nothing.
 | `scout ingest` | Parse archived filings into normalized fundamentals (DuckDB) |
 | `scout fundamentals [--entity ID]` | Coverage by taxonomy, or one entity's latest snapshot |
 | `scout metrics -e ID [--price P]` | All deterministic metrics for one entity |
+| `scout enrich` | Fetch entity profiles (SIC/sector, exchange, filing history) |
+| `scout screen [--show-excluded]` | Ranked candidate watchlist |
 | `scout llm-check` | Round-trip the harness on a synthetic filing |
 
 Add `-v` before the subcommand for INFO logging: `scout -v harvest --days 1`.
@@ -187,6 +191,42 @@ require two consecutive annual filings and refuse to run otherwise; valuation
 multiples need a price and are simply absent until one is supplied. Golden-tested
 to the digit against real 3M (us-gaap) and a Ukrainian microcap (ifrs-full),
 cross-checked against independent hand calculation.
+
+### The screen, briefly
+
+`scout screen` is the first step that produces an actual watchlist, and it is
+deterministic — no LLM runs until a name has already survived it. Order matters:
+
+1. **Hard excludes first**, because avoiding dilution machines, shells and
+   going-concerns is where the expected value is (PLAN.md rule 2). Checkable
+   today: >20% share dilution, cash runway under 12 months, recent late filings,
+   recent name/ticker change (shell-hijack), and shells (no revenue *and*
+   non-operating — a pre-revenue biotech is deliberately *not* excluded here).
+   The excludes that still need filing-text or external data (reverse splits,
+   toxic convertibles, paid promotion) report `INSUFFICIENT` and are **listed as
+   blind spots**, never silently passed — "we didn't check" and "this is fine"
+   are different claims.
+2. **Within-cohort ranking.** Survivors are ranked on a cheap × quality × safety
+   composite, but only against peers in the same (country × accounting-standard ×
+   sector) cohort — a Japanese JGAAP microcap and a US biotech are not peers, and
+   P/E across standards is not comparable. Ranking z-scores each metric within
+   the cohort (winsorized against microcap fat tails), and a name missing the
+   price-dependent cheap block is ranked on quality+safety rather than penalized.
+   Under-followed is a tie-breaker, never a factor — the neglected-firm premium
+   disappears once you control for size.
+
+Sector and several excludes need the SEC submissions data that `scout enrich`
+fetches (free): SIC → sector and the financials/utilities exclusion, `formerNames`
+→ name-change detection, filing history → delinquency. That enrichment already
+caught a real trap: SEC lists a company's *current* name inside `formerNames`
+with a rolling date, which naively reads as a same-day name change and would
+false-exclude the likes of Equifax — so an entry equal to the current name is
+ignored.
+
+The screen is meant to be **eyeballed on its own** before any research runs: if
+the ranking is junk, no LLM will fix it. At the current tiny data scale it is
+demonstrating the machinery; it becomes a real microcap watchlist as the daily
+harvest accumulates small-cap filers and a price feed is wired in.
 
 ### The harness, briefly
 

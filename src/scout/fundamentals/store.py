@@ -401,6 +401,14 @@ class FundamentalsStore:
     def entity_count(self) -> int:
         return self._conn.execute("SELECT COUNT(DISTINCT entity_id) FROM snapshots").fetchone()[0]
 
+    def all_entity_ids(self) -> list[str]:
+        """Every distinct entity in the store. The screen iterates this to build
+        one candidate per entity."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT entity_id FROM snapshots ORDER BY entity_id"
+        ).fetchall()
+        return [r[0] for r in rows]
+
     def snapshot_count(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
 
