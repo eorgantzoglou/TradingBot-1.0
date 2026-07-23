@@ -26,7 +26,7 @@ section on what the evidence does and does not support.
 | 0. Archive harvester | **done** — SEC, ESEF, EDINET, OpenDART, Companies House |
 | 1. LLM harness | **done** — adapters, reasoning, structured output, cache, cost |
 | 2. Data layer (parse → DuckDB) | **done** — SEC + ESEF parsed and normalized offline; FX per IAS 21 |
-| 3. Metrics | not started |
+| 3. Metrics | **done** — valuation, quality, risk, liquidity; deterministic, golden-tested |
 | 4. Screen | not started |
 | 5. Research agents | not started |
 | 6. Ledger + forward scoring | not started |
@@ -47,6 +47,7 @@ uv run scout harvest --days 1      # collect yesterday's filings
 uv run scout status                # what the archive holds
 uv run scout ingest                # parse the archive into normalized fundamentals
 uv run scout fundamentals          # coverage; --entity <CIK/LEI> for one snapshot
+uv run scout metrics -e 66740 --price 150   # all metrics for one entity
 uv run scout llm-check             # exercise the whole harness, no data needed
 ```
 
@@ -76,6 +77,7 @@ it is the single highest-value thing in this repo, and it costs nothing.
 | `scout status` | Archive contents by source, size, day range |
 | `scout ingest` | Parse archived filings into normalized fundamentals (DuckDB) |
 | `scout fundamentals [--entity ID]` | Coverage by taxonomy, or one entity's latest snapshot |
+| `scout metrics -e ID [--price P]` | All deterministic metrics for one entity |
 | `scout llm-check` | Round-trip the harness on a synthetic filing |
 
 Add `-v` before the subcommand for INFO logging: `scout -v harvest --days 1`.
@@ -158,6 +160,33 @@ not here — normalization stays a faithful mapping, and every canonical fact ke
 Cross-currency comparison uses ECB reference rates under IAS 21 (balance-sheet
 items at the period-end rate, income/cash-flow items at the period average) —
 never a single spot rate, and never a vendor's FX.
+
+### Metrics, briefly
+
+`scout metrics` computes every screening number in code — no LLM touches this
+path (design rule 1). The set is chosen from the evidence, not convention:
+
+- **Valuation** — EV/EBIT (the most comparable multiple across accounting
+  standards), EV/Sales, P/B, net-cash-to-market-cap, FCF yield, and Graham NCAV
+  with a net-net flag.
+- **Quality** — Novy-Marx GP/A (the best-evidenced quality metric), ROIC,
+  Sloan accruals (as a flag, not a factor — the anomaly itself has decayed), and
+  the 9-signal Piotroski F-Score, designed for exactly the low-coverage value
+  stocks this targets.
+- **Risk** — Beneish M-Score (caught 71% of famous frauds ahead of disclosure),
+  the book-value Altman Z″ (no market data, works globally), the share-issuance
+  rate (dilution — the single most important microcap red flag), and cash runway.
+- **Liquidity** — ADV, quoted spread, position capacity, and a hard
+  liquidity-floor flag, because a name you can't exit isn't a candidate.
+
+Everything degrades honestly: a metric with a missing input returns
+`ok=False` with a plain reason, never a guessed or zero value — a missing
+denominator and a real zero are different facts. Each result carries the exact
+inputs it was built from. Cross-period metrics (Piotroski, Beneish, dilution)
+require two consecutive annual filings and refuse to run otherwise; valuation
+multiples need a price and are simply absent until one is supplied. Golden-tested
+to the digit against real 3M (us-gaap) and a Ukrainian microcap (ifrs-full),
+cross-checked against independent hand calculation.
 
 ### The harness, briefly
 

@@ -17,6 +17,7 @@ from typing import Annotated
 import typer
 from pydantic import BaseModel, Field
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from scout import __version__
@@ -32,6 +33,8 @@ from scout.harness.cost import CostLedger
 from scout.harness.errors import HarnessError
 from scout.harness.protocol import Message
 from scout.harness.structured import complete_structured
+from scout.metrics.base import MarketData
+from scout.metrics.report import compute_metrics
 
 app = typer.Typer(
     add_completion=False,
@@ -359,6 +362,94 @@ def fundamentals(
             console.print(f"\n[dim]{len(snapshot.warnings)} normalization warning(s):[/dim]")
             for warning in snapshot.warnings:
                 console.print(f"  [dim]- {warning}[/dim]")
+
+
+# --------------------------------------------------------------------- metrics
+
+
+def _fmt_metric(value: float | None, kind: str) -> str:
+    if value is None:
+        return "—"
+    if value == float("inf"):
+        return "∞"
+    if kind == "pct":
+        return f"{value * 100:+.1f}%"
+    if kind == "ratio":
+        return f"{value:.2f}"
+    if kind == "score":
+        # Piotroski is an integer 0-9; Altman/Beneish are continuous. Show a
+        # whole number cleanly, a continuous score to 2 places.
+        return f"{value:.0f}" if value == int(value) else f"{value:.2f}"
+    if kind == "flag":
+        return "yes" if value else "no"
+    if kind == "count":
+        return f"{value:.1f}"
+    if kind == "currency":
+        return f"{value:,.0f}"
+    return f"{value:.4f}"
+
+
+@app.command()
+def metrics(
+    entity: Annotated[str, typer.Option("--entity", "-e", help="Entity id (CIK, LEI, ...).")],
+    price: Annotated[
+        float | None, typer.Option("--price", help="Manual price for EV/market-cap metrics.")
+    ] = None,
+    shares: Annotated[
+        float | None, typer.Option("--shares", help="Shares outstanding override.")
+    ] = None,
+) -> None:
+    """Compute all deterministic metrics for one entity.
+
+    Fundamentals-only metrics (GP/A, Altman Z, Piotroski, Beneish, dilution,
+    cash runway) need no price. Pass --price to also get the valuation multiples
+    (EV/EBIT, P/B, FCF yield); until there is a price feed this is the manual way
+    in.
+    """
+    try:
+        config = load_config_for_harvest()
+    except ValueError as exc:
+        _fail(str(exc))
+        return
+
+    if not config.db_path.exists():
+        _fail(f"No fundamentals database at {config.db_path}. Run `scout ingest` first.")
+        return
+
+    with FundamentalsStore(config.db_path, read_only=True) as store:
+        snapshots = store.snapshots_for_entity(entity)
+
+    if not snapshots:
+        _fail(f"No snapshots for entity {entity!r}. Run `scout ingest` first.")
+        return
+
+    market = MarketData(price=price, shares_outstanding=shares) if price is not None else None
+    report = compute_metrics(snapshots, market=market)
+    if report is None:
+        _fail("Could not compute metrics.")
+        return
+
+    header = f"[bold]{entity}[/bold]  {report.period_end} {report.fiscal_period or ''} {report.currency or ''}"
+    if not report.has_market_data:
+        header += "  [dim](no price — valuation multiples skipped; pass --price)[/dim]"
+    if not report.has_annual_pair:
+        header += "  [dim](one period only — Piotroski/Beneish/dilution need two annual filings)[/dim]"
+    console.print(header)
+
+    # A dim style column for the whole "note" cell, so metric warnings/reasons
+    # (which contain raw XBRL tag text and colons) never need to be markup-safe.
+    table = Table("metric", "value", "basis", "note", title="Metrics")
+    table.columns[3].style = "dim"
+    table.columns[3].no_wrap = False
+    for name, m in report.metrics.items():
+        note = m.reason or ("; ".join(m.warnings[:1]) if m.warnings else "")
+        table.add_row(
+            name,
+            _fmt_metric(m.value, m.kind),
+            m.basis if m.ok else "",
+            escape(note),
+        )
+    console.print(table)
 
 
 # ------------------------------------------------------------------ llm-check
