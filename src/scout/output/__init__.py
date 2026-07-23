@@ -6,6 +6,20 @@ report twice -- Markdown to read, JSON to machine-process -- into a day-stamped
 directory, so a watchlist's analysis accumulates as a browsable record.
 """
 
-from scout.output.report import render_markdown, report_to_dict, write_reports
+from scout.output.report import (
+    brief_to_dict,
+    render_brief,
+    render_markdown,
+    report_to_dict,
+    write_brief,
+    write_reports,
+)
 
-__all__ = ["render_markdown", "report_to_dict", "write_reports"]
+__all__ = [
+    "brief_to_dict",
+    "render_brief",
+    "render_markdown",
+    "report_to_dict",
+    "write_brief",
+    "write_reports",
+]

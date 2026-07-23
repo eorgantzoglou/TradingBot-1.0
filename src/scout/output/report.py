@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from scout.agent.models import BriefFinding, FinishedBrief
 from scout.research.models import Verdict
 from scout.research.pipeline import ResearchReport
 
@@ -190,6 +191,128 @@ def report_to_dict(
         "bear": report.bear.model_dump(mode="json"),
         "skeptic": report.skeptic.model_dump(mode="json"),
         "warnings": list(report.warnings),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# The agent's investigation brief (scout investigate)
+# --------------------------------------------------------------------------- #
+
+
+def write_brief(
+    brief: FinishedBrief,
+    out_dir: Path,
+    *,
+    run_id: str,
+    generated: datetime | None = None,
+) -> list[Path]:
+    """Write one investigation brief as Markdown + JSON. Returns the paths."""
+    generated = generated or datetime.now(UTC)
+    day_dir = out_dir / generated.date().isoformat()
+    day_dir.mkdir(parents=True, exist_ok=True)
+
+    base = f"{brief.entity_id or 'investigation'}-{_slug(brief.subject)}"
+    md_path = day_dir / f"{base}.md"
+    json_path = day_dir / f"{base}.json"
+    md_path.write_text(render_brief(brief, run_id=run_id, generated=generated), encoding="utf-8")
+    json_path.write_text(
+        json.dumps(brief_to_dict(brief, run_id=run_id, generated=generated), indent=2),
+        encoding="utf-8",
+    )
+    return [md_path, json_path]
+
+
+def render_brief(brief: FinishedBrief, *, run_id: str, generated: datetime) -> str:
+    """The human-readable investigation brief. Findings keep quote + source."""
+    veto = brief.verdict == Verdict.VETO
+    lines: list[str] = [f"# {brief.subject}", ""]
+    if brief.entity_id:
+        lines.append(f"**Entity:** `{brief.entity_id}`  ")
+    lines.append(f"**Verdict:** {'🚫 VETO' if veto else '✅ no veto'}  ")
+    lines.append(f"**Model:** {brief.model}  ")
+    lines.append(f"**Generated:** {generated.isoformat(timespec='seconds')}  ")
+    lines.append(f"**Run:** `{run_id}`")
+    lines.append("")
+    lines.append("> *Not investment advice. The agent may surface a candidate; the veto is "
+                 "decided in code and every number is code-computed.*")
+    lines.append("")
+    lines.append(f"## Headline\n\n{brief.headline}\n")
+    lines.append(f"## Thesis\n\n{brief.thesis}\n")
+    lines.append(f"## Recommendation\n\n{brief.recommendation}\n")
+
+    if veto:
+        lines.append("## Veto reasons (code-decided)\n")
+        lines.extend(f"- ❌ {reason}" for reason in brief.veto_reasons)
+        lines.append("")
+
+    lines.append(f"## Findings ({len(brief.verified_findings)} verified)\n")
+    if brief.verified_findings:
+        for finding in brief.verified_findings:
+            lines.append(f"### {'🚩 ' if finding.is_red_flag else ''}{finding.claim}")
+            lines.append("")
+            lines.append(f"> {finding.quoted_span}")
+            lines.append(f">\n> — source `{finding.source}`")
+            lines.append("")
+    else:
+        lines.append("_No finding survived citation verification._\n")
+
+    if brief.metrics_block:
+        lines.append(f"## Code-computed metrics\n\n```\n{brief.metrics_block}\n```\n")
+
+    lines.append("## What the agent did\n")
+    if brief.steps:
+        for i, step in enumerate(brief.steps, start=1):
+            flag = "" if step.ok else " (failed)"
+            lines.append(f"{i}. **{step.tool}**{flag} — {step.thought}")
+    else:
+        lines.append("_No tools were called._")
+    lines.append("")
+
+    if brief.dropped_findings or brief.warnings:
+        lines.append("## Data quality\n")
+        for finding, reason in brief.dropped_findings:
+            lines.append(f"- dropped: \"{finding.claim}\" — {reason}")
+        for warning in brief.warnings:
+            lines.append(f"- {warning}")
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def brief_to_dict(brief: FinishedBrief, *, run_id: str, generated: datetime) -> dict[str, Any]:
+    """The brief as JSON-safe data."""
+    return {
+        "subject": brief.subject,
+        "entity_id": brief.entity_id,
+        "run_id": run_id,
+        "model": brief.model,
+        "generated": generated.isoformat(),
+        "verdict": brief.verdict.value,
+        "vetoed": brief.vetoed,
+        "headline": brief.headline,
+        "thesis": brief.thesis,
+        "recommendation": brief.recommendation,
+        "veto_reasons": list(brief.veto_reasons),
+        "verified_findings": [_finding_dict(f) for f in brief.verified_findings],
+        "dropped_findings": [
+            {"finding": _finding_dict(f), "reason": reason}
+            for f, reason in brief.dropped_findings
+        ],
+        "metrics_block": brief.metrics_block,
+        "steps": [
+            {"tool": s.tool, "tool_input": s.tool_input, "thought": s.thought, "ok": s.ok}
+            for s in brief.steps
+        ],
+        "warnings": list(brief.warnings),
+    }
+
+
+def _finding_dict(finding: BriefFinding) -> dict[str, Any]:
+    return {
+        "claim": finding.claim,
+        "quoted_span": finding.quoted_span,
+        "source": finding.source,
+        "is_red_flag": finding.is_red_flag,
     }
 
 

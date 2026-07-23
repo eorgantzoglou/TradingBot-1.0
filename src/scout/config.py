@@ -94,6 +94,9 @@ class SourceCredentials:
     opendart_key: str | None = None
     companies_house_key: str | None = None
     openfigi_key: str | None = None
+    tavily_api_key: str | None = None
+    """Optional web-search key for the research agent. Without it the agent falls
+    back to the keyless (best-effort) DuckDuckGo provider."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +112,10 @@ class Config:
     cache_dir: Path = Path(".cache/llm")
     enable_cache: bool = True
     concurrency: int = 8
+
+    web_search_provider: str = "duckduckgo"
+    """Which web-search backend the research agent uses: "duckduckgo" (keyless,
+    best-effort) or "tavily" (needs TAVILY_API_KEY, cleaner results)."""
 
     @property
     def archive_dir(self) -> Path:
@@ -160,12 +167,14 @@ def load_config() -> Config:
             opendart_key=_opt("OPENDART_API_KEY"),
             companies_house_key=_opt("COMPANIES_HOUSE_API_KEY"),
             openfigi_key=_opt("OPENFIGI_API_KEY"),
+            tavily_api_key=_opt("TAVILY_API_KEY"),
         ),
         user_agent=_str("USER_AGENT"),
         data_dir=Path(_str("DATA_DIR", "data")),
         cache_dir=Path(_str("LLM_CACHE_DIR", ".cache/llm")),
         enable_cache=_bool("LLM_CACHE", True),
         concurrency=_int("CONCURRENCY", 8),
+        web_search_provider=_str("WEB_SEARCH_PROVIDER", "duckduckgo").lower(),
     )
 
     problems = config.validate()

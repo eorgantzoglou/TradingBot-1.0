@@ -48,6 +48,22 @@ class VerificationResult:
         return self.dropped_count / total if total else 0.0
 
 
+def quote_in_text(quote: str, text: str) -> bool:
+    """Whether `quote` appears in `text`: exact, then whitespace-normalised, then
+    high token-overlap. The one matcher shared by finding verification here and
+    the agent brief (`agent/brief.py`), so both enforce the same 'a human can
+    click it and read the exact words' bar. A quote below the minimum length is
+    too generic to verify and is rejected."""
+    q = quote.strip()
+    if len(q) < _MIN_QUOTE_CHARS:
+        return False
+    if q in text:
+        return True
+    if _normalize(q) in _normalize(text):
+        return True
+    return _token_overlap(q, _normalize(text)) >= _FUZZY_THRESHOLD
+
+
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().casefold()
 

@@ -27,6 +27,8 @@ from rich.markup import escape
 from rich.table import Table
 
 from scout import __version__
+from scout.agent.run import investigate as investigate_agent
+from scout.agent.run import resolve_subject
 from scout.config import Config, load_config, load_config_for_harvest
 from scout.data.archive import Archive
 from scout.data.harvest import ALL_SOURCES, DayResult, build_sources, harvest, recent_days
@@ -41,7 +43,7 @@ from scout.harness.protocol import Message
 from scout.harness.structured import complete_structured
 from scout.metrics.base import MarketData
 from scout.metrics.report import compute_metrics
-from scout.output import write_reports
+from scout.output import write_brief, write_reports
 from scout.portfolio.evaluate import DEFAULT_COST_BPS, evaluate, scope_to_vintage
 from scout.portfolio.ledger import Ledger, LedgerError
 from scout.portfolio.models import Evaluation, Strategy, StrategyScore
@@ -723,6 +725,101 @@ def _render_memo(report) -> None:  # type: ignore[no-untyped-def]
 
 def _sev_color(severity: str) -> str:
     return {"critical": "red", "high": "yellow", "medium": "cyan", "low": "dim"}.get(severity, "")
+
+
+# ----------------------------------------------------------------- investigate
+
+
+@app.command()
+def investigate(
+    thesis: Annotated[
+        str | None,
+        typer.Argument(help='A company or a theme to investigate, e.g. "microcaps below net cash".'),
+    ] = None,
+    entity: Annotated[
+        str | None, typer.Option("--entity", "-e", help="Investigate one known entity id (CIK/LEI).")
+    ] = None,
+    max_steps: Annotated[
+        int, typer.Option("--max-steps", help="Tool-call budget for the agent.")
+    ] = 12,
+    out: Annotated[
+        str | None, typer.Option("--out", help="Directory for the saved brief (default: data/reports).")
+    ] = None,
+    no_save: Annotated[bool, typer.Option("--no-save", help="Print only; do not write a file.")] = False,
+    no_cache: Annotated[bool, typer.Option("--no-cache", help="Bypass the replay cache.")] = False,
+) -> None:
+    """Deep-research an entity or theme with an agent that drives its own tools.
+
+    Unlike `scout research` (a fixed pipeline where the LLM only reads and vetoes),
+    the agent here searches filings and the web, pulls a company's numbers, and
+    decides what to look at next. But the leash holds: every number comes from a
+    code tool, every claim is quote-verified against a source it actually fetched,
+    and the veto is decided in code. It may surface a candidate; it cannot invent
+    one, cite a phantom source, or overrule a veto. Needs a model in .env.
+    """
+    try:
+        config = load_config()
+    except ValueError as exc:
+        _fail(str(exc))
+        return
+
+    if entity:
+        subject = resolve_subject(config, entity)
+    elif thesis:
+        subject = thesis
+    else:
+        _fail('Give a thesis argument or --entity. e.g. scout investigate "cheap profitable microcaps".')
+        return
+
+    console.print(f"[bold]Investigating[/bold] {escape(subject)} ...\n")
+    try:
+        brief, ledger = asyncio.run(
+            investigate_agent(
+                config, subject=subject, entity_id=entity, max_steps=max_steps, use_cache=not no_cache
+            )
+        )
+    except HarnessError as exc:
+        _fail(f"{type(exc).__name__}: {exc}")
+        return
+
+    _render_brief(brief)
+
+    if not no_save:
+        run_id = f"{date.today().isoformat()}-{uuid.uuid4().hex[:8]}"
+        out_dir = Path(out) if out else config.reports_dir
+        paths = write_brief(brief, out_dir, run_id=run_id)
+        console.print(f"[dim]Saved brief to {paths[0]} (with JSON sidecar).[/dim]")
+
+    console.print(f"\n{ledger.render()}")
+
+
+def _render_brief(brief) -> None:  # type: ignore[no-untyped-def]
+    veto = brief.verdict == Verdict.VETO
+    style = "red" if veto else "green"
+    console.print(
+        f"[bold]{escape(brief.subject)}[/bold]"
+        f"{f' ({brief.entity_id})' if brief.entity_id else ''}  "
+        f"[{style}]{'VETO' if veto else 'no veto'}[/{style}]"
+    )
+    console.print(f"  {escape(brief.headline)}")
+    console.print(f"  [dim]{escape(brief.thesis)}[/dim]")
+    console.print(f"  [bold]Recommendation:[/bold] {escape(brief.recommendation)}")
+
+    for reason in brief.veto_reasons:
+        console.print(f"  [red]✗ {escape(reason)}[/red]")
+
+    if brief.verified_findings:
+        console.print(f"  [bold]findings[/bold] ({len(brief.verified_findings)} verified):")
+        for f in brief.verified_findings[:8]:
+            flag = "[red]🚩[/red] " if f.is_red_flag else ""
+            console.print(f"    {flag}{escape(f.claim)}  [dim]({escape(f.source)})[/dim]")
+    if brief.dropped_findings:
+        console.print(
+            f"  [dim yellow]{len(brief.dropped_findings)} finding(s) dropped — "
+            f"quote not in any fetched source[/dim yellow]"
+        )
+    for warning in brief.warnings:
+        console.print(f"  [dim]! {escape(warning)}[/dim]")
 
 
 # ----------------------------------------------------------------- pick / score

@@ -30,6 +30,7 @@ section on what the evidence does and does not support.
 | 4. Screen | **done** — hard excludes, SIC/sector enrichment, within-cohort ranking |
 | 5. Research agents | **done** — cited extraction, citation verification, debate, veto memo |
 | 6. Ledger + forward scoring | **done** — pre-registered picks, forward scoring vs three dumb baselines |
+| +. Research agent (`scout investigate`) | **done** — an LLM that drives its own tools, on a leash of code-computed numbers, citation verification, and the code-decided veto |
 
 ## Quickstart
 
@@ -51,6 +52,7 @@ uv run scout metrics -e 66740 --price 150   # all metrics for one entity
 uv run scout enrich                # fetch SIC/sector, exchange, filing history
 uv run scout screen --show-excluded         # ranked candidate watchlist
 uv run scout research --top 5      # cited LLM research over the top candidates
+uv run scout investigate -e 66740  # agent drives its own tools -> cited brief
 uv run scout pick --prices p.json  # pre-register today's paper picks per strategy
 uv run scout score --prices q.json # grade past picks vs the three dumb baselines
 uv run scout llm-check             # exercise the whole harness, no data needed
@@ -86,6 +88,7 @@ it is the single highest-value thing in this repo, and it costs nothing.
 | `scout enrich` | Fetch entity profiles (SIC/sector, exchange, filing history) |
 | `scout screen [--show-excluded]` | Ranked candidate watchlist |
 | `scout research [--top N \| -e ID]` | Cited LLM research + veto memo (needs a model); saves Markdown + JSON to `data/reports/` |
+| `scout investigate "<thesis>" \| -e ID` | Deep-research agent that drives its own tools (filings, web, metrics) → cited brief |
 | `scout pick [--prices f] [--research]` | Pre-register today's paper picks per strategy into the ledger |
 | `scout score --prices f` | Grade the ledger's picks against forward prices, vs three baselines |
 | `scout llm-check` | Round-trip the harness on a synthetic filing |
@@ -240,6 +243,39 @@ debate) and JSON to diff or automate — plus a per-run index. `--no-save` print
 only; `--out` relocates. Reports are the current read; the immutable record stays
 in the ledger and the archive.
 
+### The research agent, briefly
+
+`scout investigate` is the other half of the original vision: instead of a fixed
+pipeline where the LLM only reads and vetoes, an **agent drives** — it searches
+SEC full-text and the web, pulls a company's numbers, reads filings, and decides
+what to look at next. But it runs on a leash of code. A hand-rolled JSON-action
+loop (`agent/loop.py`) over the same structured-output ladder — no framework,
+works on any backend the harness supports — calls tools that are thin wrappers
+over the deterministic stack: `compute_metrics`, `screen`, `check_excludes`, and
+`deep_analyze` (which runs the whole `research` pipeline and returns its
+code-decided verdict), plus discovery tools (`search_filings`, `read_filing`,
+`web_search`, `fetch_url`).
+
+The one rule that relaxes: the agent **may surface and recommend** a candidate,
+not only veto one. Everything else holds, in code, not prompt:
+
+- **Numbers come from tools.** Every figure in the brief is the code-computed one;
+  the compose step forbids the model inventing any.
+- **Claims need quotes that verify.** Each finding must quote a source the agent
+  actually fetched; a post-compose pass (`brief.py`, reusing the research
+  pipeline's `quote_in_text`) **drops** any quote not found in the gathered
+  evidence — so the model cannot cite what it did not read, and the brief says so
+  when it happens.
+- **The veto is code-decided.** For an ingested entity the disciplined pipeline
+  runs and its `decide_verdict` owns the verdict; the agent's recommendation is
+  advisory and a code VETO overrides it.
+
+Web/news search sits behind a provider seam (`data/sources/web.py`): a keyless
+DuckDuckGo default so it runs today, and a Tavily drop-in (`WEB_SEARCH_PROVIDER`,
+`TAVILY_API_KEY`) for cleaner results — with the microcap **promotion caveat**
+(enthusiastic coverage is often paid) stated in the agent's own prompt. Briefs are
+saved to `data/reports/` as Markdown + JSON, same as `scout research`.
+
 ### The screen, briefly
 
 `scout screen` is the first step that produces an actual watchlist, and it is
@@ -366,7 +402,7 @@ uv run pytest -q
 uv run ruff check src tests
 ```
 
-572 tests, no network — every source is exercised through `respx` mocks.
+620 tests, no network — every source is exercised through `respx` mocks.
 
 One lesson already learned the hard way: mocked tests only prove the code
 matches the fixture. Two real bugs in the SEC parser (a missing `edgar/` URL
