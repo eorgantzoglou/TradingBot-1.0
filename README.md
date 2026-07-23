@@ -28,7 +28,7 @@ section on what the evidence does and does not support.
 | 2. Data layer (parse → DuckDB) | **done** — SEC + ESEF parsed and normalized offline; FX per IAS 21 |
 | 3. Metrics | **done** — valuation, quality, risk, liquidity; deterministic, golden-tested |
 | 4. Screen | **done** — hard excludes, SIC/sector enrichment, within-cohort ranking |
-| 5. Research agents | not started |
+| 5. Research agents | **done** — cited extraction, citation verification, debate, veto memo |
 | 6. Ledger + forward scoring | not started |
 
 ## Quickstart
@@ -50,6 +50,7 @@ uv run scout fundamentals          # coverage; --entity <CIK/LEI> for one snapsh
 uv run scout metrics -e 66740 --price 150   # all metrics for one entity
 uv run scout enrich                # fetch SIC/sector, exchange, filing history
 uv run scout screen --show-excluded         # ranked candidate watchlist
+uv run scout research --top 5      # cited LLM research over the top candidates
 uv run scout llm-check             # exercise the whole harness, no data needed
 ```
 
@@ -82,6 +83,7 @@ it is the single highest-value thing in this repo, and it costs nothing.
 | `scout metrics -e ID [--price P]` | All deterministic metrics for one entity |
 | `scout enrich` | Fetch entity profiles (SIC/sector, exchange, filing history) |
 | `scout screen [--show-excluded]` | Ranked candidate watchlist |
+| `scout research [--top N \| -e ID]` | Cited LLM research + veto memo (needs a model) |
 | `scout llm-check` | Round-trip the harness on a synthetic filing |
 
 Add `-v` before the subcommand for INFO logging: `scout -v harvest --days 1`.
@@ -191,6 +193,42 @@ require two consecutive annual filings and refuse to run otherwise; valuation
 multiples need a price and are simply absent until one is supplied. Golden-tested
 to the digit against real 3M (us-gaap) and a Ukrainian microcap (ifrs-full),
 cross-checked against independent hand calculation.
+
+### Research, briefly
+
+`scout research` is where the harness meets the screen — and the only place the
+LLM runs. For each candidate that already survived the screen, the pipeline
+chains five stages in the one order that keeps the trust guarantee intact:
+
+```
+evidence  →  extract  →  VERIFY citations  →  debate  →  memo
+```
+
+- **Evidence** (no LLM): pull the primary document's narrative from the archived
+  filing and select the red-flag passages (going-concern, toxic convertibles,
+  related-party, dilution, reverse splits, auditor changes) plus the code-computed
+  metrics. The company name and tickers are redacted to `[COMPANY]`/`[TICKER]` —
+  anonymized inputs remove both look-ahead and a "distraction" effect and, per
+  Glasserman & Lin, actually score better.
+- **Extract**: the model is a *forensic reader*, not a decider. Every finding
+  must carry a **verbatim quote** and the accession it came from.
+- **Verify** (no LLM — the linchpin): each quote is checked against the exact
+  text the model was shown. A finding whose quote isn't really there is **dropped
+  before the debate can see it**. Instruction isn't enforcement; this is. A high
+  drop rate is itself surfaced as a signal that the extractor is confabulating.
+- **Debate**: bull and bear argue from the verified findings only; a skeptic
+  (ideally a *different model family*) tries to refute and makes the
+  disqualifying call, caution-by-default for microcaps.
+- **Memo**: the verdict is decided in **code** (`decide_verdict`) — a confirmed
+  critical finding or a skeptic disqualification vetoes. The model writes the
+  prose but cannot overturn the gate, cannot invent a number (all injected from
+  `metrics/`), and cannot recommend buying. It can **veto** a candidate the
+  screen chose; it can never **promote** one (design rule 1).
+
+Needs a model in `.env` (any OpenAI-compatible endpoint, local or hosted, or
+Anthropic). The whole pipeline is tested end to end with a scripted fake client,
+including the two guarantees that matter: a fabricated citation is dropped, and
+the model cannot escape a code-decided veto.
 
 ### The screen, briefly
 

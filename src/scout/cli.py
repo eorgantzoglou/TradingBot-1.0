@@ -35,6 +35,8 @@ from scout.harness.protocol import Message
 from scout.harness.structured import complete_structured
 from scout.metrics.base import MarketData
 from scout.metrics.report import compute_metrics
+from scout.research.models import Verdict
+from scout.research.pipeline import research_entities
 from scout.screen.profile import enrich
 from scout.screen.screen import run_screen
 
@@ -565,6 +567,104 @@ def metrics(
             escape(note),
         )
     console.print(table)
+
+
+# -------------------------------------------------------------------- research
+
+
+@app.command()
+def research(
+    entity: Annotated[
+        str | None, typer.Option("--entity", "-e", help="Research one entity id.")
+    ] = None,
+    top: Annotated[
+        int, typer.Option("--top", help="Research the top N screened candidates.")
+    ] = 5,
+    no_cache: Annotated[bool, typer.Option("--no-cache", help="Bypass the replay cache.")] = False,
+) -> None:
+    """Run the cited LLM research pipeline over screened candidates.
+
+    For each candidate: build an evidence pack from its filings, extract findings
+    each anchored to a verbatim quote, verify every citation, run a bull/bear/
+    skeptic debate, and write a memo. The LLM can VETO but never promote a name,
+    and the verdict is decided in code. Needs a model configured in .env.
+    """
+    try:
+        config = load_config()
+    except ValueError as exc:
+        _fail(str(exc))
+        return
+
+    if not config.db_path.exists():
+        _fail(f"No fundamentals database at {config.db_path}. Run `scout ingest` first.")
+        return
+
+    if entity:
+        entity_ids = [entity]
+    else:
+        screen_result = run_screen(config)
+        entity_ids = [c.entity_id for c in screen_result.ranked[:top]]
+        if not entity_ids:
+            _fail("The screen produced no ranked candidates to research.")
+            return
+
+    client = build_client(config, use_cache=not no_cache, prompt_version="research/1")
+    console.print(
+        f"[bold]Researching[/bold] {len(entity_ids)} candidate(s) with {client.model} ...\n"
+    )
+
+    try:
+        reports = asyncio.run(research_entities(config, entity_ids, client=client))
+    except HarnessError as exc:
+        _fail(f"{type(exc).__name__}: {exc}")
+        return
+
+    if not reports:
+        _fail("No candidate could be researched (missing filings or metrics).")
+        return
+
+    for report in reports:
+        _render_memo(report)
+
+    vetoed = sum(1 for r in reports if r.vetoed)
+    console.print(
+        f"\n[bold]Summary[/bold]: {len(reports)} researched, "
+        f"[red]{vetoed} vetoed[/red], {len(reports) - vetoed} survived."
+    )
+
+
+def _render_memo(report) -> None:  # type: ignore[no-untyped-def]
+    memo = report.memo
+    verdict_style = "red" if memo.verdict == Verdict.VETO else "green"
+    verdict_text = "VETO" if memo.verdict == Verdict.VETO else "no veto"
+    console.print(
+        f"[bold]{escape(report.name or report.entity_id)}[/bold] "
+        f"({report.entity_id})  [{verdict_style}]{verdict_text}[/{verdict_style}]"
+    )
+    console.print(f"  {escape(memo.headline)}")
+    console.print(f"  [dim]{escape(memo.thesis)}[/dim]")
+
+    if memo.veto_reasons:
+        for reason in memo.veto_reasons:
+            console.print(f"  [red]✗ {escape(reason)}[/red]")
+
+    if report.verified_findings:
+        console.print(f"  [bold]findings[/bold] ({len(report.verified_findings)} cited):")
+        for f in report.verified_findings[:6]:
+            console.print(f"    [{_sev_color(f.severity.value)}]{f.severity.value}[/] "
+                          f"{f.category.value}: {escape(f.claim)}")
+    if report.dropped_citations:
+        console.print(
+            f"  [dim yellow]{len(report.dropped_citations)} finding(s) dropped — "
+            f"citation not found in the filing[/dim yellow]"
+        )
+    for warning in report.warnings:
+        console.print(f"  [dim]! {escape(warning)}[/dim]")
+    console.print()
+
+
+def _sev_color(severity: str) -> str:
+    return {"critical": "red", "high": "yellow", "medium": "cyan", "low": "dim"}.get(severity, "")
 
 
 # ------------------------------------------------------------------ llm-check
