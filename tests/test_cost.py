@@ -59,6 +59,17 @@ def test_unknown_model_has_no_price():
     assert price_for("some-model-nobody-has-heard-of") is None
 
 
+def test_deepseek_v4_is_priced_not_counted_free():
+    # A hosted DeepSeek run must be billed at its real rate, not fall through to
+    # the local-model zero entry.
+    flash = price_for("deepseek-v4-flash")
+    assert flash is not None
+    assert flash.input == 0.14
+    assert flash.output == 0.28
+    assert flash.cached_input == 0.0028
+    assert price_for("deepseek-v4-pro").output == 0.87
+
+
 def test_anthropic_cache_reads_are_a_tenth_of_base_input():
     opus = PRICES["claude-opus-4-8"]
     assert opus.cached_input == pytest.approx(opus.input * CACHE_READ_MULTIPLIER)

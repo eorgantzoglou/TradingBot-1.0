@@ -98,6 +98,12 @@ PRICES: dict[str, Price] = {
     "gpt-5": Price(1.25, 10.00, cached_input=0.125),
     "gpt-4o-mini": Price(0.15, 0.60, cached_input=0.075),
     "gpt-4o": Price(2.50, 10.00, cached_input=1.25),
+    # DeepSeek V4 (hosted). Prices from api-docs.deepseek.com, read 2026-07-23;
+    # cached_input is DeepSeek's context-cache *hit* price (caching is automatic,
+    # like OpenAI's). Distinct ids from the "deepseek-r1" local zero-entry below,
+    # so a hosted v4 run is priced rather than counted free.
+    "deepseek-v4-flash": Price(0.14, 0.28, cached_input=0.0028),
+    "deepseek-v4-pro": Price(0.435, 0.87, cached_input=0.003625),
     # Anything served locally: electricity is not in scope. Present so a local
     # Qwen3 run reports 0.0 as a *known* zero rather than an unknown-model
     # warning on every single call.

@@ -127,6 +127,28 @@ def openai_effort_params(effort: Effort | None) -> dict[str, Any]:
     return {"reasoning_effort": effort}
 
 
+def deepseek_effort_params(effort: Effort | None) -> dict[str, Any]:
+    """Translate the effort enum for DeepSeek's OpenAI-compatible endpoint.
+
+    DeepSeek's V4 models (deepseek-v4-flash / -pro) think by DEFAULT, and unlike
+    OpenAI their `reasoning_effort` knob does NOT accept "none" -- it only takes
+    "high"/"max" (low/medium are mapped up to high). So the lever that turns
+    thinking OFF -- which is what a reader-extraction task wants, for speed, cost,
+    and so `temperature` is honoured -- is DeepSeek's own `thinking` toggle,
+    passed through the OpenAI SDK's `extra_body`. Getting this wrong is the same
+    empty-content / wasted-latency failure a local Qwen shows.
+    See https://api-docs.deepseek.com/guides/thinking_mode.
+    """
+    if effort is None:
+        return {}  # leave DeepSeek's default (thinking on) untouched
+    if effort == "none":
+        return {"extra_body": {"thinking": {"type": "disabled"}}}
+    # Any thinking level: thinking is already on by default, so reasoning_effort
+    # alone sets the depth. DeepSeek maps low/medium up to high, so one "high"
+    # covers scout's low/medium/high without sending a value DeepSeek rejects.
+    return {"reasoning_effort": "high"}
+
+
 # Budgets in output tokens. Anthropic's floor is 1024, so "low" is the floor;
 # "medium" is roughly one page of thinking, which is what a filing-extraction
 # task needs; "high" is for the adversarial-review stage where the model is

@@ -28,7 +28,11 @@ from scout.harness.protocol import (
     OutputMode,
     Usage,
 )
-from scout.harness.reasoning import normalize_message, openai_effort_params
+from scout.harness.reasoning import (
+    deepseek_effort_params,
+    normalize_message,
+    openai_effort_params,
+)
 
 OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
@@ -53,6 +57,13 @@ _BACKEND_DEFAULTS: dict[str, Capabilities] = {
     ),
     "openrouter.ai": Capabilities(
         native_schema=False, strict_tools=False, json_object=True, effort=True, prompt_cache=False
+    ),
+    # DeepSeek's OpenAI-compatible endpoint. json_object is solid; native
+    # json_schema is not documented as supported (and not in thinking mode), so
+    # start the ladder at the JSON-object rung rather than eat a 400 on every
+    # call. Context caching is automatic (like OpenAI), so prompt_cache is on.
+    "api.deepseek.com": Capabilities(
+        native_schema=False, strict_tools=False, json_object=True, effort=True, prompt_cache=True
     ),
     # Default ports, because that is how these are addressed in practice.
     ":11434": Capabilities(  # Ollama
@@ -88,6 +99,20 @@ def capabilities_for(base_url: str | None, model: str) -> Capabilities:
     return _UNKNOWN_BACKEND
 
 
+def reasoning_style_for(base_url: str | None) -> str:
+    """Which reasoning-request dialect this endpoint speaks.
+
+    Keyed off the base URL (an explicit config value), the same way
+    `capabilities_for` keys its defaults -- NOT off the model name, which the
+    module docstring explains is the bug. Only DeepSeek needs a non-OpenAI
+    dialect so far: its `reasoning_effort` rejects "none", so thinking is turned
+    off through its own `thinking` toggle instead (see `deepseek_effort_params`).
+    """
+    if base_url and "deepseek" in base_url.lower():
+        return "deepseek"
+    return "openai"
+
+
 class OpenAICompatAdapter:
     """`LLMClient` over the OpenAI SDK. See `protocol.LLMClient` for the contract."""
 
@@ -101,16 +126,26 @@ class OpenAICompatAdapter:
         capabilities: Capabilities,
         base_url: str | None = None,
         timeout: float = 180.0,
+        reasoning_style: str | None = None,
         client: Any | None = None,
     ):
         self.model = model
         self.capabilities = capabilities
         self.base_url = base_url or OPENAI_DEFAULT_BASE_URL
+        # How this endpoint expects the reasoning knob to be set. Auto-detected
+        # from the base URL, overridable for tests.
+        self.reasoning_style = reasoning_style or reasoning_style_for(self.base_url)
         # `client` is the seam the tests inject through; production always builds
         # its own. Retries/backoff/429 handling are the SDK's job, not ours.
         self._client = client or openai.AsyncOpenAI(
             api_key=api_key, base_url=base_url, timeout=timeout
         )
+
+    def _effort_params(self, effort: Effort | None) -> dict[str, Any]:
+        """Effort translated for this endpoint's dialect."""
+        if self.reasoning_style == "deepseek":
+            return deepseek_effort_params(effort)
+        return openai_effort_params(effort)
 
     async def complete(
         self,
@@ -141,7 +176,7 @@ class OpenAICompatAdapter:
             # which reaches the caller as UnsupportedParameterError carrying the
             # provider's own (actionable) text.
             params["max_tokens"] = max_tokens
-        params.update(openai_effort_params(effort))
+        params.update(self._effort_params(effort))
         params.update(self._output_params(output_mode, json_schema, schema_name))
 
         try:

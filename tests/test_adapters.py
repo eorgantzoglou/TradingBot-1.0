@@ -27,6 +27,7 @@ from scout.harness.adapters.anthropic import (
 from scout.harness.adapters.openai_compat import (
     OpenAICompatAdapter,
     capabilities_for,
+    reasoning_style_for,
 )
 from scout.harness.errors import ProviderError, UnsupportedParameterError
 from scout.harness.protocol import Capabilities, LLMClient, Message, OutputMode
@@ -242,6 +243,72 @@ async def test_unset_effort_and_temperature_are_omitted_entirely():
     assert "reasoning_effort" not in sent
     assert "temperature" not in sent
     assert "max_tokens" not in sent
+
+
+# --------------------------------------------------------------------------
+# OpenAI-compat: DeepSeek reasoning dialect
+# --------------------------------------------------------------------------
+
+
+def test_capabilities_for_deepseek_start_at_json_object():
+    caps = capabilities_for("https://api.deepseek.com", "deepseek-v4-flash")
+    # native json_schema is not relied on; the JSON-object rung is.
+    assert caps.native_schema is False
+    assert caps.json_object is True
+    assert caps.effort is True
+
+
+def test_reasoning_style_is_detected_from_the_base_url():
+    assert reasoning_style_for("https://api.deepseek.com") == "deepseek"
+    assert reasoning_style_for("https://api.openai.com/v1") == "openai"
+    assert reasoning_style_for("http://localhost:11434/v1") == "openai"
+    assert reasoning_style_for(None) == "openai"
+
+
+def test_adapter_auto_detects_the_deepseek_dialect_from_base_url():
+    adapter = OpenAICompatAdapter(
+        model="deepseek-v4-flash",
+        api_key="placeholder",
+        base_url="https://api.deepseek.com",
+        capabilities=Capabilities(json_object=True),
+        client=_openai_client(_completion({"role": "assistant", "content": "hi"})),
+    )
+    assert adapter.reasoning_style == "deepseek"
+
+
+async def test_deepseek_effort_none_disables_thinking_via_extra_body():
+    # DeepSeek's reasoning_effort rejects "none", so thinking is turned off with
+    # its own toggle in extra_body -- and reasoning_effort is NOT sent.
+    adapter = _openai_adapter(
+        _completion({"role": "assistant", "content": "hi"}), reasoning_style="deepseek"
+    )
+    await adapter.complete(PROMPT, effort="none", temperature=0.2)
+    sent = adapter._client._endpoint.captured
+    assert sent["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning_effort" not in sent
+    assert sent["temperature"] == 0.2  # honoured in non-thinking mode
+
+
+async def test_deepseek_thinking_level_sends_reasoning_effort_high():
+    # scout's low/medium/high all map to DeepSeek's "high" (it rejects the others),
+    # and thinking is on by default so no extra_body toggle is needed.
+    adapter = _openai_adapter(
+        _completion({"role": "assistant", "content": "hi"}), reasoning_style="deepseek"
+    )
+    await adapter.complete(PROMPT, effort="medium")
+    sent = adapter._client._endpoint.captured
+    assert sent["reasoning_effort"] == "high"
+    assert "extra_body" not in sent
+
+
+async def test_deepseek_unset_effort_touches_no_reasoning_knob():
+    adapter = _openai_adapter(
+        _completion({"role": "assistant", "content": "hi"}), reasoning_style="deepseek"
+    )
+    await adapter.complete(PROMPT)
+    sent = adapter._client._endpoint.captured
+    assert "reasoning_effort" not in sent
+    assert "extra_body" not in sent
 
 
 # --------------------------------------------------------------------------
