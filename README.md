@@ -292,7 +292,10 @@ carried over verbatim in spirit from the old bot's `score.js`:
 - **The distribution, not the hit rate.** Returns are so right-skewed
   (Bessembinder 2018) that a strategy can be right 55% of the time and still lose
   money, so every strategy reports its full quantile spread with the median
-  stated next to the mean; the hit rate is shown but never alone.
+  stated next to the mean; the hit rate is shown but never alone. The
+  agent-vs-baseline verdict cites *both* the mean and median delta, and calls a
+  result "inconclusive" when they disagree in sign — the fingerprint of a
+  skew-driven win one big holding is carrying.
 - **Say when the sample is too small.** Below ~30 scored picks the verdict is
   "insufficient evidence" — a 70% hit rate on a handful of picks is what a coin
   flip returns routinely, and the report says so loudly.
@@ -301,9 +304,13 @@ carried over verbatim in spirit from the old bot's `score.js`:
 
 Everything degrades honestly, the same as the layers beneath it. There is no
 price feed yet (a documented deferral), so prices are supplied by hand
-(`--price ID=VALUE` or a `--prices` JSON file) and `evaluate.py` takes them as an
-input rather than reaching for a vendor — a name with no price is recorded
-ungradeable, never guessed to zero. The GBDT baseline needs labeled forward-return
+(`--price ID=VALUE` or a `--prices` JSON file, validated finite and positive) and
+`evaluate.py` takes them as an input rather than reaching for a vendor — a name
+with no price is recorded ungradeable, never guessed to zero. Because a forward
+return only means something over one holding window, `scout score` grades a
+single pick vintage at a time (the latest by default, `--vintage`/`--run-id` to
+pick another) rather than pooling picks from different dates against one price
+snapshot. The GBDT baseline needs labeled forward-return
 history to train, which does not exist until picks have been scored, so it
 reports INSUFFICIENT (and its `lightgbm` dependency is an optional `gbdt` extra)
 until the forward archive is deep enough. The ledger is one JSON line per pick —
@@ -353,7 +360,7 @@ uv run pytest -q
 uv run ruff check src tests
 ```
 
-552 tests, no network — every source is exercised through `respx` mocks.
+572 tests, no network — every source is exercised through `respx` mocks.
 
 One lesson already learned the hard way: mocked tests only prove the code
 matches the fixture. Two real bugs in the SEC parser (a missing `edgar/` URL

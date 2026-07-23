@@ -75,13 +75,27 @@ def test_non_finite_feature_fails_loud_and_writes_nothing(tmp_path):
     assert not path.exists()
 
 
-def test_corrupt_line_raises_with_line_number(tmp_path):
+def test_corrupt_middle_line_raises_with_line_number(tmp_path):
+    """A malformed line that is NOT the last is a real integrity problem -- the
+    read must fail loudly rather than silently truncate the history."""
     path = tmp_path / "ledger.jsonl"
     Ledger(path).append([_pick("111")])
     with path.open("a", encoding="utf-8") as fh:
         fh.write("{not valid json}\n")
+    Ledger(path).append([_pick("222")])  # a valid line AFTER the corrupt one
     with pytest.raises(LedgerError, match="line 2"):
         Ledger(path).read()
+
+
+def test_torn_final_line_is_tolerated(tmp_path):
+    """A torn LAST line (an append interrupted by a crash) loses one pick, not the
+    whole file -- the recoverable case the JSONL format was chosen for."""
+    path = tmp_path / "ledger.jsonl"
+    Ledger(path).append([_pick("111"), _pick("222")])
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write('{"as_of": "2026-07-23", "strateg')  # torn mid-write, no newline
+    read = Ledger(path).read()
+    assert [p.entity_id for p in read] == ["111", "222"]  # the two good picks survive
 
 
 def test_blank_lines_are_skipped(tmp_path):

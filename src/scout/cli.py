@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -37,7 +38,7 @@ from scout.harness.protocol import Message
 from scout.harness.structured import complete_structured
 from scout.metrics.base import MarketData
 from scout.metrics.report import compute_metrics
-from scout.portfolio.evaluate import DEFAULT_COST_BPS, evaluate
+from scout.portfolio.evaluate import DEFAULT_COST_BPS, evaluate, scope_to_vintage
 from scout.portfolio.ledger import Ledger, LedgerError
 from scout.portfolio.models import Evaluation, Strategy, StrategyScore
 from scout.portfolio.pick import PickBatch, run_pick
@@ -682,7 +683,9 @@ def _load_prices(inline: list[str] | None, prices_file: str | None) -> dict[str,
     There is no price feed yet (PLAN.md 1.3 deferral), so prices are supplied by
     hand. Inline pairs override the file, so a quick correction does not mean
     editing the file. A malformed entry fails loud rather than being dropped --
-    a silently ignored price becomes a silently ungradeable pick.
+    a silently ignored price becomes a silently ungradeable pick, and a non-finite
+    or non-positive one would push inf/nan straight into the score. Keys are
+    stripped consistently (file and inline) so " AAPL " and "AAPL" match.
     """
     prices: dict[str, float] = {}
     if prices_file:
@@ -696,20 +699,29 @@ def _load_prices(inline: list[str] | None, prices_file: str | None) -> dict[str,
         if not isinstance(raw, dict):
             _fail(f"prices file {path} must be a JSON object of entity_id -> price.")
         for entity_id, value in raw.items():  # type: ignore[union-attr]
-            try:
-                prices[str(entity_id)] = float(value)
-            except (TypeError, ValueError):
-                _fail(f"price for {entity_id!r} in {path} is not a number: {value!r}")
+            prices[str(entity_id).strip()] = _price_value(value, f"{entity_id!r} in {path}")
 
     for pair in inline or []:
         if "=" not in pair:
             _fail(f"--price expects ENTITY=VALUE, got {pair!r}.")
         entity_id, _, value = pair.partition("=")
-        try:
-            prices[entity_id.strip()] = float(value)
-        except ValueError:
-            _fail(f"--price value for {entity_id!r} is not a number: {value!r}")
+        prices[entity_id.strip()] = _price_value(value, f"--price {entity_id.strip()!r}")
     return prices
+
+
+def _price_value(value: object, where: str) -> float:
+    """Coerce and validate one price: a finite, positive number. `bool` is
+    rejected outright -- JSON `true` would otherwise coerce to 1.0 and read as a
+    real quote."""
+    if isinstance(value, bool):
+        _fail(f"price for {where} must be a number, not a boolean: {value!r}")
+    try:
+        price = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        _fail(f"price for {where} is not a number: {value!r}")
+    if not math.isfinite(price) or price <= 0:
+        _fail(f"price for {where} must be finite and positive, got {price!r}")
+    return price
 
 
 @app.command(name="pick")
@@ -801,6 +813,13 @@ def score_cmd(
     as_of: Annotated[
         str | None, typer.Option("--as-of", help="Exit date, YYYY-MM-DD (default: today).")
     ] = None,
+    vintage: Annotated[
+        str | None,
+        typer.Option("--vintage", help="Grade only picks with this pick date, YYYY-MM-DD."),
+    ] = None,
+    run_id: Annotated[
+        str | None, typer.Option("--run-id", help="Grade only picks from this pick run.")
+    ] = None,
     cost_bps: Annotated[
         float, typer.Option("--cost-bps", help="Round-trip cost in basis points.")
     ] = DEFAULT_COST_BPS,
@@ -826,6 +845,10 @@ def score_cmd(
         )
         return
 
+    if cost_bps < 0:
+        _fail(f"--cost-bps must be >= 0 (a cost cannot pay you), got {cost_bps}.")
+        return
+
     try:
         picks = ledger.read()
     except LedgerError as exc:
@@ -833,6 +856,17 @@ def score_cmd(
         return
     if not picks:
         _fail("The ledger is empty. Run `scout pick` to pre-register a book first.")
+        return
+
+    # Scope to one comparable book: grading picks from several dates against a
+    # single forward-price snapshot would mix holding periods and mislead.
+    scoped, scope_note = scope_to_vintage(
+        picks,
+        vintage=_parse_day(vintage) if vintage else None,
+        run_id=run_id,
+    )
+    if not scoped:
+        _fail(scope_note or "no picks matched the requested vintage/run.")
         return
 
     exit_day = _parse_day(as_of) if as_of else date.today()
@@ -844,15 +878,17 @@ def score_cmd(
         )
         return
 
-    result = evaluate(picks, forward_prices, as_of_exit=exit_day, cost_bps=cost_bps)
-    _render_score(result)
+    result = evaluate(scoped, forward_prices, as_of_exit=exit_day, cost_bps=cost_bps)
+    _render_score(result, scope_note=scope_note)
 
 
-def _render_score(result: Evaluation) -> None:
+def _render_score(result: Evaluation, *, scope_note: str | None = None) -> None:
     console.print(
         f"[bold]Scored[/bold] as of {result.as_of_exit}  ·  {result.total_scored} graded pick(s)  "
         f"·  [dim]{result.cost_bps:.0f} bps round-trip cost[/dim]"
     )
+    if scope_note:
+        console.print(f"[yellow]{escape(scope_note)}[/yellow]")
 
     table = Table(
         "strategy", "book", "graded", "return", "median", "p10", "p90", "hit",
@@ -869,11 +905,12 @@ def _render_score(result: Evaluation) -> None:
     # recorded (scout pick --research). Without one, the baselines still stand on
     # their own above -- so skip an all-"no agent book" block rather than print it.
     if Strategy.AGENT in result.scores and result.comparisons:
-        console.print("\n[bold]Agent vs baselines[/bold]")
+        console.print("\n[bold]Agent vs baselines[/bold]  [dim](mean · median)[/dim]")
         for comp in result.comparisons:
-            style = "green" if (comp.delta or 0) > 0 else "red"
-            delta = f"[{style}]{comp.delta:+.1%}[/{style}]" if comp.delta is not None else "—"
-            console.print(f"  vs {comp.baseline.value:<16} {delta}  [dim]{escape(comp.verdict)}[/dim]")
+            console.print(
+                f"  vs {comp.baseline.value:<16} {_delta_cell(comp.delta)} · "
+                f"{_delta_cell(comp.median_delta)}  [dim]{escape(comp.verdict)}[/dim]"
+            )
 
     for score in result.scores.values():
         for note in score.notes:
@@ -882,6 +919,14 @@ def _render_score(result: Evaluation) -> None:
     # The most important thing this command prints, so it goes last and loud.
     for warning in result.warnings:
         console.print(f"\n[bold yellow]{escape(warning)}[/bold yellow]")
+
+
+def _delta_cell(value: float | None) -> str:
+    if value is None:
+        return "—"
+    style = "green" if value > 0 else "red" if value < 0 else ""
+    text = f"{value:+.1%}"
+    return f"[{style}]{text}[/{style}]" if style else text
 
 
 def _add_score_row(table: Table, score: StrategyScore) -> None:

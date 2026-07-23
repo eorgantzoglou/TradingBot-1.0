@@ -221,18 +221,36 @@ class StrategyScore:
 @dataclass(frozen=True, slots=True)
 class Comparison:
     """The agent measured against one baseline. The verdict the whole project
-    turns on: does the LLM layer earn its cost?"""
+    turns on: does the LLM layer earn its cost?
+
+    Both the mean (portfolio) delta and the median delta are carried, because
+    under Bessembinder skew they can disagree -- a book lifted by one big winner
+    can beat a baseline on the mean while its typical pick trails. A verdict that
+    leaned only on the mean would let exactly that fluke read as 'signal', so the
+    median is a co-equal input here, not decoration (PLAN.md 6)."""
 
     baseline: Strategy
     agent_return: float | None
     baseline_return: float | None
     delta: float | None
-    """agent_return - baseline_return, in the same units (fraction). Positive =
-    the agent beat the baseline. None when either side had nothing to grade."""
+    """agent_return - baseline_return (weighted portfolio means), a fraction.
+    Positive = the agent's book earned more. None when the comparison is not
+    credible (either side ungradeable, or below the sample bar)."""
 
     verdict: str
     """Plain-language read, including the honest 'insufficient evidence' when the
-    sample is too small to mean anything."""
+    sample is too small to mean anything, and a caution when mean and median
+    disagree in sign."""
+
+    median_delta: float | None = None
+    """agent median pick return - baseline median pick return. None when not
+    credible. Reported next to `delta` so a skew-driven mean win cannot stand
+    alone."""
+
+    signs_disagree: bool = False
+    """True when the mean delta and median delta point opposite ways -- the
+    signature of a skew-driven result, and a reason to treat the verdict as
+    inconclusive rather than as evidence of signal."""
 
 
 @dataclass(frozen=True, slots=True)

@@ -16,6 +16,7 @@ from scout.portfolio.evaluate import (
     MIN_CREDIBLE_SAMPLE,
     evaluate,
     labeled_observations,
+    scope_to_vintage,
     score_picks,
 )
 from scout.portfolio.models import PaperPick, Strategy
@@ -111,6 +112,12 @@ def test_distribution_quantiles_and_median():
     assert dist.minimum == pytest.approx(-0.20)
     assert dist.maximum == pytest.approx(0.20)
     assert dist.hit_rate == pytest.approx(0.4)  # 2 of 5 positive
+    # Pin the quantiles too (linear interpolation, numpy 'linear' method), so a
+    # regression in _percentile can't slip through this test.
+    assert dist.p10 == pytest.approx(-0.16)  # 0.10*(5-1)=0.4 between -0.20 and -0.10
+    assert dist.p25 == pytest.approx(-0.10)  # 0.25*4=1.0 -> exactly the 2nd value
+    assert dist.p75 == pytest.approx(0.10)
+    assert dist.p90 == pytest.approx(0.16)
 
 
 def test_small_sample_warning_fires():
@@ -167,6 +174,129 @@ def test_comparison_is_insufficient_below_the_sample_bar():
     # A 29pp lead on 3 picks is noise, and the verdict says so rather than
     # crowning the agent.
     assert "insufficient evidence" in comp.verdict
+
+
+def test_score_picks_skips_non_finite_and_non_positive_prices():
+    """H1 defensive backstop: a bad price must be ungradeable, never poison the
+    distribution with inf/nan (nan == 0 is False, so a naive guard misses it)."""
+    picks = [
+        _pick("nan_ref", reference_price=float("nan")),
+        _pick("inf_ref", reference_price=float("inf")),
+        _pick("neg_ref", reference_price=-100.0),
+        _pick("zero_ref", reference_price=0.0),
+        _pick("ok", reference_price=100.0),
+        _pick("nan_fwd", reference_price=100.0),
+        _pick("neg_fwd", reference_price=100.0),
+    ]
+    fwd = {
+        "nan_ref": 100.0, "inf_ref": 100.0, "neg_ref": 100.0, "zero_ref": 100.0,
+        "ok": 110.0, "nan_fwd": float("nan"), "neg_fwd": -50.0,
+    }
+    scored = score_picks(picks, fwd, cost_bps=0.0)
+    assert [s.pick.entity_id for s in scored] == ["ok"]
+
+
+def test_evaluate_dedups_same_pick_id_keeping_last():
+    """H2: a same-day re-pick (identical pick_id) must not double-count; the last
+    occurrence supersedes."""
+    first = _pick("111", reference_price=100.0)
+    second = _pick("111", reference_price=50.0)  # same as_of+strategy+entity => same id
+    assert first.pick_id == second.pick_id
+    result = evaluate([first, second], {"111": 110.0}, as_of_exit=EXIT, cost_bps=0.0)
+    score = result.scores[Strategy.SCREEN]
+    assert score.n_scored == 1                      # counted once, not twice
+    assert score.portfolio_return == pytest.approx(1.2)  # 110/50 - 1, the LAST ref price
+
+
+def test_scope_to_vintage_defaults_to_latest_and_warns():
+    """H2: scoring must not pool picks from several dates against one price snapshot;
+    default to the latest vintage and say so."""
+    old = PaperPick(
+        as_of=date(2026, 7, 1), strategy=Strategy.SCREEN, entity_id="a", name=None,
+        cohort="", reference_price=100.0, currency=None, weight=1.0, rank=None,
+        score=None, vetoed=None, features={}, run_id="r1",
+    )
+    new = _pick("b")  # as_of 2026-07-23
+    scoped, note = scope_to_vintage([old, new])
+    assert [p.entity_id for p in scoped] == ["b"]  # only the latest date
+    assert note is not None and "spans" in note
+
+
+def test_scope_to_vintage_explicit_vintage_and_run_id():
+    old = PaperPick(
+        as_of=date(2026, 7, 1), strategy=Strategy.SCREEN, entity_id="a", name=None,
+        cohort="", reference_price=100.0, currency=None, weight=1.0, rank=None,
+        score=None, vetoed=None, features={}, run_id="r1",
+    )
+    new = _pick("b")
+    by_date, _ = scope_to_vintage([old, new], vintage=date(2026, 7, 1))
+    assert [p.entity_id for p in by_date] == ["a"]
+    by_run, _ = scope_to_vintage([old, new], run_id="r1")
+    assert [p.entity_id for p in by_run] == ["a"]
+    empty, note = scope_to_vintage([old, new], run_id="does-not-exist")
+    assert empty == [] and note is not None
+
+
+def test_verdict_reports_median_and_flags_sign_disagreement():
+    """H3: a book lifted above the baseline on the MEAN by one big winner, while its
+    MEDIAN pick trails, must read as inconclusive -- not as 'the agent beat it'."""
+    # Agent: 29 flat picks + 1 huge winner -> mean high, median 0.
+    agent = [_pick(f"a{i}", strategy=Strategy.AGENT) for i in range(29)]
+    agent.append(_pick("a_win", strategy=Strategy.AGENT))
+    agent_fwd = {p.entity_id: 100.0 for p in agent}      # 0% for the 29
+    agent_fwd["a_win"] = 400.0                            # +300% winner
+    # Baseline: 30 flat picks at +5%.
+    base = [_pick(f"b{i}", strategy=Strategy.EV_EBIT_DECILE) for i in range(30)]
+    base_fwd = {p.entity_id: 105.0 for p in base}
+
+    result = evaluate(agent + base, {**agent_fwd, **base_fwd}, as_of_exit=EXIT, cost_bps=0.0)
+    comp = next(c for c in result.comparisons if c.baseline == Strategy.EV_EBIT_DECILE)
+    assert comp.delta is not None and comp.delta > 0        # mean: agent ahead
+    assert comp.median_delta is not None and comp.median_delta < 0  # median: agent behind
+    assert comp.signs_disagree
+    assert "mixed" in comp.verdict and "inconclusive" in comp.verdict
+    # Crucially, a skew-driven mean win is NOT reported as the agent beating the bar.
+    assert "beat" not in comp.verdict
+
+
+def test_insufficient_comparison_has_no_delta():
+    """M1: below the sample bar, delta must be None so no reader charts noise as real."""
+    agent_p, agent_fwd = _many(Strategy.AGENT, 0.30, 3, 0)
+    base_p, base_fwd = _many(Strategy.EV_EBIT_DECILE, 0.01, 3, 100)
+    result = evaluate(agent_p + base_p, {**agent_fwd, **base_fwd}, as_of_exit=EXIT, cost_bps=0.0)
+    comp = next(c for c in result.comparisons if c.baseline == Strategy.EV_EBIT_DECILE)
+    assert comp.delta is None
+    assert comp.median_delta is None
+
+
+def test_sample_warning_keys_off_smallest_book_not_largest():
+    """M2: a big universe book reaching 30 must not silence the warning while a thin
+    book is shown next to it."""
+    big, big_fwd = _many(Strategy.UNIVERSE_EW, 0.05, MIN_CREDIBLE_SAMPLE, 0)
+    thin, thin_fwd = _many(Strategy.SCREEN, 0.05, 4, 500)
+    result = evaluate(big + thin, {**big_fwd, **thin_fwd}, as_of_exit=EXIT, cost_bps=0.0)
+    assert any("too few" in w for w in result.warnings)
+
+
+def test_tie_reads_as_matched_not_trailed():
+    agent_p, agent_fwd = _many(Strategy.AGENT, 0.05, MIN_CREDIBLE_SAMPLE, 0)
+    base_p, base_fwd = _many(Strategy.UNIVERSE_EW, 0.05, MIN_CREDIBLE_SAMPLE, 100)
+    result = evaluate(agent_p + base_p, {**agent_fwd, **base_fwd}, as_of_exit=EXIT, cost_bps=0.0)
+    comp = next(c for c in result.comparisons if c.baseline == Strategy.UNIVERSE_EW)
+    assert "matched" in comp.verdict
+    assert "trailed" not in comp.verdict
+
+
+def test_empty_baseline_message_does_not_blame_the_agent():
+    """LOW: when the agent book is fine but a baseline had nothing gradeable, the
+    message must name the baseline, not claim there is no agent book."""
+    agent_p, agent_fwd = _many(Strategy.AGENT, 0.05, 3, 0)
+    # An EV/EBIT book that is entirely ungradeable (no forward prices for it).
+    base = [_pick(f"b{i}", strategy=Strategy.EV_EBIT_DECILE) for i in range(3)]
+    result = evaluate(agent_p + base, agent_fwd, as_of_exit=EXIT, cost_bps=0.0)
+    comp = next(c for c in result.comparisons if c.baseline == Strategy.EV_EBIT_DECILE)
+    assert "no agent book" not in comp.verdict
+    assert "ev_ebit_decile" in comp.verdict
 
 
 def test_labeled_observations_bridge_to_the_gbdt():

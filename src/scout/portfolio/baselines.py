@@ -202,6 +202,16 @@ class GradientBoostedTree:
         labels = [obs.forward_return for obs in history]
 
         dataset = lgb.Dataset(rows, label=labels, feature_name=order)
-        params = {"objective": "regression", "verbosity": -1, "min_data_in_leaf": 5}
+        # seed + deterministic so the baseline is reproducible run-to-run -- the
+        # house rule is that every number here is deterministic and testable, and
+        # a baseline that shifts on re-train would not be a fair, stable bar.
+        params = {
+            "objective": "regression",
+            "verbosity": -1,
+            "min_data_in_leaf": 5,
+            "seed": 0,
+            "deterministic": True,
+            "force_row_wise": True,
+        }
         model = lgb.train(params, dataset, num_boost_round=self.num_boost_round)
         return model, order

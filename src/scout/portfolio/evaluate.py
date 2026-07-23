@@ -65,9 +65,15 @@ def evaluate(
     A pick is graded only if it has both a reference price (recorded at pick
     time) and a forward price (supplied here); anything missing either is counted
     as ungradeable and reported, never guessed to zero.
+
+    Callers should scope `picks` to a single pick vintage first (see
+    `scope_to_vintage`): grading one forward-price snapshot against picks from
+    several dates would silently compare different holding periods. As a final
+    guard against a same-day re-pick, picks are de-duplicated by `pick_id` here
+    (last occurrence wins), so one entity cannot be double-counted in a book.
     """
     by_strategy: dict[Strategy, list[PaperPick]] = defaultdict(list)
-    for pick in picks:
+    for pick in _dedup_by_pick_id(picks):
         by_strategy[pick.strategy].append(pick)
 
     scores: dict[Strategy, StrategyScore] = {}
@@ -88,6 +94,58 @@ def evaluate(
     )
 
 
+def scope_to_vintage(
+    picks: list[PaperPick],
+    *,
+    vintage: date | None = None,
+    run_id: str | None = None,
+) -> tuple[list[PaperPick], str | None]:
+    """Narrow a ledger to one comparable book, returning (picks, note).
+
+    Forward returns only mean something when every graded pick shares a holding
+    window, so scoring must not pool picks from different pick dates against one
+    forward-price snapshot. This selects a single vintage:
+
+      - an explicit `run_id` (one `scout pick` invocation) wins if given;
+      - else an explicit `vintage` (pick `as_of` date);
+      - else, if the ledger holds more than one pick date, the latest is used and
+        a note explains that the others were left out.
+
+    The note is surfaced to the user, never swallowed -- a silently narrowed
+    ledger would be its own kind of dishonest score.
+    """
+    if run_id:
+        selected = [p for p in picks if p.run_id == run_id]
+        note = None if selected else f"no picks found for run {run_id!r}."
+        return selected, note
+    if vintage:
+        selected = [p for p in picks if p.as_of == vintage]
+        note = None if selected else f"no picks found for vintage {vintage.isoformat()}."
+        return selected, note
+
+    dates = sorted({p.as_of for p in picks})
+    if len(dates) <= 1:
+        return picks, None
+    latest = dates[-1]
+    selected = [p for p in picks if p.as_of == latest]
+    note = (
+        f"the ledger spans {len(dates)} pick dates; grading only the latest "
+        f"({latest.isoformat()}), because one forward-price snapshot cannot fairly "
+        "grade picks from different dates. Pass --vintage or --run-id to grade "
+        "another, and grade each vintage against its own forward window."
+    )
+    return selected, note
+
+
+def _dedup_by_pick_id(picks: list[PaperPick]) -> list[PaperPick]:
+    """Collapse duplicate pick_ids (a same-day re-pick), keeping the last -- so a
+    re-run of `scout pick` supersedes rather than double-counts."""
+    latest: dict[str, PaperPick] = {}
+    for pick in picks:
+        latest[pick.pick_id] = pick
+    return list(latest.values())
+
+
 def score_picks(
     picks: list[PaperPick], forward_prices: dict[str, float], *, cost_bps: float
 ) -> list[ScoredPick]:
@@ -97,7 +155,14 @@ def score_picks(
     for pick in picks:
         entry = pick.reference_price
         exit_price = forward_prices.get(pick.entity_id)
-        if entry is None or entry == 0 or exit_price is None:
+        # A non-finite or non-positive price is not a real quote -- grading it
+        # would push inf/nan straight into the distribution the whole project is
+        # judged on. Treat it as ungradeable, the same as a missing price. The CLI
+        # rejects such values at input; this is the defensive backstop so no
+        # caller of evaluate() can silently poison a score.
+        if entry is None or not math.isfinite(entry) or entry <= 0:
+            continue
+        if exit_price is None or not math.isfinite(exit_price) or exit_price <= 0:
             continue
         gross = exit_price / entry - 1.0
         net = gross - cost_bps / 10_000.0
@@ -201,49 +266,103 @@ def _compare(
     base_ret = base.portfolio_return
     n_agent = agent.n_scored if agent else 0
 
-    # Insufficient evidence dominates: a difference on a handful of picks is noise,
-    # so we refuse to call a winner before either side clears the sample bar.
-    if agent is None or agent_ret is None or base_ret is None:
+    # No agent book, or a baseline with nothing gradeable: there is simply no
+    # comparison to make. Name which side is missing rather than always blaming
+    # the agent.
+    if agent is None or agent_ret is None:
         return Comparison(baseline, agent_ret, base_ret, None, "no agent book to compare yet.")
+    if base_ret is None:
+        return Comparison(
+            baseline, agent_ret, None, None,
+            f"the {baseline.value} baseline had nothing gradeable to compare against.",
+        )
+
+    # Insufficient evidence dominates: a difference on a handful of picks is noise,
+    # so we refuse to attach a meaningful delta before both sides clear the bar.
+    # delta is left None here so no downstream reader can chart a noise gap as real.
     if n_agent < MIN_CREDIBLE_SAMPLE or base.n_scored < MIN_CREDIBLE_SAMPLE:
         return Comparison(
-            baseline,
-            agent_ret,
-            base_ret,
-            agent_ret - base_ret,
+            baseline, agent_ret, base_ret, None,
             f"insufficient evidence (agent N={n_agent}, {baseline.value} N={base.n_scored}; "
             f"need >= {MIN_CREDIBLE_SAMPLE} each). Any gap here is noise.",
+            median_delta=None,
         )
 
     delta = agent_ret - base_ret
-    if baseline == Strategy.EV_EBIT_DECILE and delta <= 0:
-        verdict = (
-            f"the agent did NOT beat the EV/EBIT decile ({delta:+.1%}). On this evidence "
-            "the LLM research layer is cost, not signal -- a one-line value screen did as "
-            "well or better."
+    median_delta = _median_delta(agent, base)
+    # Signs disagree => a few outliers are driving the mean the other way from the
+    # typical pick. That is the skew the whole module warns about, so the verdict
+    # says "inconclusive", not "beat".
+    signs_disagree = median_delta is not None and (delta > 0) != (median_delta > 0)
+
+    verdict = _verdict_text(baseline, delta, median_delta, signs_disagree)
+    return Comparison(
+        baseline, agent_ret, base_ret, delta, verdict,
+        median_delta=median_delta, signs_disagree=signs_disagree,
+    )
+
+
+def _median_delta(agent: StrategyScore, base: StrategyScore) -> float | None:
+    """Difference of the two books' median pick returns, if both have one."""
+    if agent.distribution is None or base.distribution is None:
+        return None
+    return agent.distribution.median - base.distribution.median
+
+
+def _verdict_text(
+    baseline: Strategy, delta: float, median_delta: float | None, signs_disagree: bool
+) -> str:
+    """Phrase the head-to-head, always citing BOTH the mean and median delta so a
+    skew-driven mean win cannot be read as signal on its own."""
+    both = _mean_median_phrase(delta, median_delta)
+
+    if signs_disagree:
+        return (
+            f"mixed vs {baseline.value} ({both}): mean and median disagree, so a few "
+            "outliers are driving the average -- inconclusive, not evidence of signal."
         )
-    elif delta > 0:
-        verdict = f"the agent beat {baseline.value} by {delta:+.1%}."
-    else:
-        verdict = f"the agent trailed {baseline.value} by {delta:+.1%}."
-    return Comparison(baseline, agent_ret, base_ret, delta, verdict)
+    beat = delta > 0 and (median_delta is None or median_delta > 0)
+    if baseline == Strategy.EV_EBIT_DECILE and not beat:
+        return (
+            f"the agent did NOT beat the EV/EBIT decile ({both}). On this evidence the LLM "
+            "research layer is cost, not signal -- a one-line value screen did as well or better."
+        )
+    if beat:
+        return f"the agent beat {baseline.value} ({both})."
+    if delta == 0 and (median_delta in (None, 0.0)):
+        return f"the agent matched {baseline.value} ({both})."
+    return f"the agent trailed {baseline.value} ({both})."
+
+
+def _mean_median_phrase(delta: float, median_delta: float | None) -> str:
+    if median_delta is None:
+        return f"mean {delta:+.1%}"
+    return f"mean {delta:+.1%}, median {median_delta:+.1%}"
 
 
 def _sample_warnings(scores: dict[Strategy, StrategyScore]) -> list[str]:
-    """The load-bearing honesty line from score.js, adapted to returns."""
-    best_n = max((s.n_scored for s in scores.values()), default=0)
+    """The load-bearing honesty line from score.js, adapted to returns.
+
+    Keyed off the SMALLEST non-empty book, not the largest. A big universe book
+    reaching 30 must not silence the warning while a 4-pick agent or baseline book
+    is rendered next to it with the same authority -- the thin book is exactly the
+    one a reader would over-trust.
+    """
+    graded = [s.n_scored for s in scores.values() if s.n_scored > 0]
     warnings: list[str] = []
-    if best_n == 0:
+    if not graded:
         warnings.append(
             "Nothing scoreable yet: no pick had both a reference and a forward price. "
             "Supply forward prices and let the picks age before reading anything into this."
         )
-    elif best_n < MIN_CREDIBLE_SAMPLE:
+    elif min(graded) < MIN_CREDIBLE_SAMPLE:
+        thin = min(graded)
         warnings.append(
-            f"!! {best_n} scored pick(s) is FAR too few to mean anything. A coin flip "
-            "returns 70%+ hit rates on small samples routinely, and one big winner swings "
-            f"the mean entirely. Treat this as a plumbing check, not evidence -- aim for "
-            f"{MIN_CREDIBLE_SAMPLE}+ per strategy, ideally 100+, before judging."
+            f"!! at least one strategy has only {thin} scored pick(s) -- FAR too few to "
+            "mean anything. A coin flip returns 70%+ hit rates on small samples routinely, "
+            "and one big winner swings the mean entirely. Treat every thin book here as a "
+            f"plumbing check, not evidence -- aim for {MIN_CREDIBLE_SAMPLE}+ per strategy, "
+            "ideally 100+, before judging."
         )
     return warnings
 

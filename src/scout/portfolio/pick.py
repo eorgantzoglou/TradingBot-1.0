@@ -115,6 +115,7 @@ def run_pick(
 
     # --- the agent (optional; needs a model) -----------------------------------
     if research_client is not None:
+        requested = _top_ranked(by_id, top)
         agent_picks = _agent_picks(
             config,
             by_id,
@@ -130,6 +131,16 @@ def run_pick(
         batch.strategies.append(
             _strategy_batch(Strategy.AGENT, [p for p in agent_picks if p.weight > 0], None)
         )
+        # An empty agent book after research ran on real candidates almost always
+        # means the pipeline failed (bad key, model unreachable) rather than that
+        # every name was vetoed -- research_entities swallows per-entity errors.
+        # Say so, so a broken run is not mistaken for a clean "all vetoed" result.
+        if requested and not agent_picks:
+            batch.notes.append(
+                f"--research ran on {len(requested)} candidate(s) but the pipeline returned "
+                "no reports. The model may be unreachable or misconfigured; the agent book is "
+                "empty for that reason, not because every name was vetoed."
+            )
 
     batch.total_written = ledger.append(all_picks)
     return batch

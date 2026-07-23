@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -62,18 +63,28 @@ class Ledger:
 
         try:
             # allow_nan=False makes Infinity/NaN a hard error rather than emitting
-            # the non-standard tokens Python's json writes by default.
+            # the non-standard tokens Python's json writes by default. A non-finite
+            # value here means one slipped past validation -- features are
+            # finite-filtered and prices are validated at the CLI, so name the pick
+            # rather than assuming which field is at fault.
             lines = [json.dumps(p.to_dict(), allow_nan=False) for p in picks]
         except ValueError as exc:
+            culprit = next((p.pick_id for p in picks if not _serializable(p)), "unknown")
             raise LedgerError(
-                f"a pick would not serialize to strict JSON ({exc}); this is a bug "
-                "-- features should already be finite-filtered. Not writing the batch."
+                f"pick {culprit!r} has a non-finite value and will not serialize to strict "
+                f"JSON ({exc}). Not writing the batch -- check its reference_price, score, "
+                "weight and features."
             ) from exc
 
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             with self._path.open("a", encoding="utf-8") as fh:
                 fh.write("\n".join(lines) + "\n")
+                # Flush and fsync so an append is durable on return: the ledger is
+                # a pre-registration record, and a pick that "succeeded" but sat in
+                # an OS buffer through a crash would be a silently lost bet.
+                fh.flush()
+                os.fsync(fh.fileno())
         except OSError as exc:
             raise LedgerError(f"could not write to ledger {self._path}: {exc}") from exc
 
@@ -83,29 +94,39 @@ class Ledger:
     def read(self) -> list[PaperPick]:
         """Every pick in the ledger, in file order.
 
-        A malformed line is a data-integrity problem, not something to skip
-        quietly -- the whole read fails with the offending line number so it can
-        be fixed, rather than silently returning a truncated history that a score
-        would then treat as complete.
+        A malformed line in the MIDDLE is a data-integrity problem -- the read
+        fails with the offending line number rather than silently returning a
+        truncated history a score would treat as complete. But a torn FINAL line
+        (the tail of an append interrupted by a crash or power loss) is expected
+        and recoverable: it is skipped with a warning, so one lost pick never
+        makes the whole ledger unreadable. That is the crash-tolerance the JSONL
+        format was chosen for.
         """
         if not self._path.exists():
             return []
 
-        picks: list[PaperPick] = []
         try:
             with self._path.open(encoding="utf-8") as fh:
-                for lineno, raw in enumerate(fh, start=1):
-                    line = raw.strip()
-                    if not line:
-                        continue
-                    try:
-                        picks.append(PaperPick.from_dict(json.loads(line)))
-                    except (ValueError, KeyError) as exc:
-                        raise LedgerError(
-                            f"{self._path} line {lineno} is not a valid pick: {exc}"
-                        ) from exc
+                content = [(n, raw.strip()) for n, raw in enumerate(fh, start=1) if raw.strip()]
         except OSError as exc:
             raise LedgerError(f"could not read ledger {self._path}: {exc}") from exc
+
+        picks: list[PaperPick] = []
+        for index, (lineno, line) in enumerate(content):
+            try:
+                picks.append(PaperPick.from_dict(json.loads(line)))
+            except (ValueError, KeyError) as exc:
+                is_last = index == len(content) - 1
+                if is_last:
+                    logger.warning(
+                        "%s line %d looks like a torn final line (interrupted append); "
+                        "skipping it: %s",
+                        self._path, lineno, exc,
+                    )
+                    break
+                raise LedgerError(
+                    f"{self._path} line {lineno} is not a valid pick: {exc}"
+                ) from exc
         return picks
 
     def read_strategy(self, strategy: Strategy) -> list[PaperPick]:
@@ -119,3 +140,13 @@ class Ledger:
             if pick.run_id:
                 seen.setdefault(pick.run_id, None)
         return list(seen)
+
+
+def _serializable(pick: PaperPick) -> bool:
+    """Whether one pick encodes to strict JSON -- used only to name the culprit
+    when a batch write fails, so the error can point at the offending pick."""
+    try:
+        json.dumps(pick.to_dict(), allow_nan=False)
+        return True
+    except ValueError:
+        return False
