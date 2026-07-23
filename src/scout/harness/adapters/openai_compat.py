@@ -296,6 +296,19 @@ class OpenAICompatAdapter:
                 endpoint=endpoint,
             ) from exc
 
+        if status == 402:
+            # The key is valid and the model resolved -- the account is just out
+            # of credit. A hosted-provider case the local-first design did not
+            # originally anticipate; distinct from a bad key (401) so the fix is
+            # clear: top up, not re-issue.
+            raise ProviderError(
+                f"{self.base_url} accepted the credentials but the account has no balance "
+                f"(HTTP 402): {detail}. The API key is valid -- top up the provider account "
+                "(e.g. DeepSeek: platform.deepseek.com) and retry.",
+                status=status,
+                endpoint=endpoint,
+            ) from exc
+
         if status == 404:
             raise ProviderError(
                 f"Model '{self.model}' not found at {self.base_url} (HTTP 404). "

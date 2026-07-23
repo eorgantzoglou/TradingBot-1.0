@@ -370,6 +370,20 @@ async def test_400_and_422_are_downgradeable(kind, status):
     assert excinfo.value.status == status
 
 
+async def test_402_says_the_account_is_out_of_balance_not_the_key():
+    adapter = _openai_adapter(
+        _status_error(openai_sdk.APIStatusError, 402, "https://api.deepseek.com")
+    )
+    with pytest.raises(ProviderError) as excinfo:
+        await adapter.complete(PROMPT)
+    message = str(excinfo.value)
+    assert excinfo.value.status == 402
+    assert "no balance" in message
+    assert "key is valid" in message
+    # Not a downgradeable parameter problem.
+    assert not isinstance(excinfo.value, UnsupportedParameterError)
+
+
 async def test_401_points_at_the_api_key():
     adapter = _openai_adapter(
         _status_error(openai_sdk.AuthenticationError, 401, "http://localhost:11434/v1")
